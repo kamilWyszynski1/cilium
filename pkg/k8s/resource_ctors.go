@@ -453,6 +453,20 @@ func CiliumEndpointSliceResource(params CiliumResourceParams, localNodeStore *no
 	), nil
 }
 
+func CiliumNodeSlicesResource(params CiliumResourceParams, opts ...func(*metav1.ListOptions)) (resource.Resource[*cilium_api_v2.CiliumNodeSlice], error) {
+	if !params.ClientSet.IsEnabled() {
+		return nil, nil
+	}
+	lw := utils.ListerWatcherWithModifiers(
+		utils.ListerWatcherFromTyped[*cilium_api_v2.CiliumNodeSliceList](params.ClientSet.CiliumV2().CiliumNodeSlices()),
+		opts...,
+	)
+	return resource.New[*cilium_api_v2.CiliumNodeSlice](params.Lifecycle, lw, params.MetricsProvider,
+		resource.WithMetric("CiliumNodeSlice"),
+		resource.WithCRDSync(params.CRDSyncPromise), // optional, can be nil
+	), nil
+}
+
 // ciliumEndpointSliceLocalPodIndexFunc is an IndexFunc that indexes CiliumEndpointSlices
 // by their corresponding Pod, which are running locally on this Node.
 func ciliumEndpointSliceLocalPodIndexFunc(localNodeStore *node.LocalNodeStore, obj any) ([]string, error) {

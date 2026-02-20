@@ -36,6 +36,7 @@ const (
 	k8sAPIGroupCiliumClusterwideNetworkPolicyV2 = "cilium/v2::CiliumClusterwideNetworkPolicy"
 	k8sAPIGroupCiliumCIDRGroupV2                = "cilium/v2::CiliumCIDRGroup"
 	k8sAPIGroupCiliumNodeV2                     = "cilium/v2::CiliumNode"
+	k8sAPIGroupCiliumNodeSliceV2                = "cilium/v2::CiliumNodeSlice"
 	k8sAPIGroupCiliumEndpointV2                 = "cilium/v2::CiliumEndpoint"
 	k8sAPIGroupCiliumLocalRedirectPolicyV2      = "cilium/v2::CiliumLocalRedirectPolicy"
 	k8sAPIGroupCiliumEndpointSliceV2Alpha1      = "cilium/v2alpha1::CiliumEndpointSlice"
@@ -188,6 +189,7 @@ var ciliumResourceToGroupMapping = map[string]watcherInfo{
 	synced.CRDResourceName(cilium_v2.CCNPName):          {waitOnly, k8sAPIGroupCiliumClusterwideNetworkPolicyV2}, // Handled in pkg/policy/k8s/
 	synced.CRDResourceName(cilium_v2.CEPName):           {start, k8sAPIGroupCiliumEndpointV2},                    // ipcache
 	synced.CRDResourceName(cilium_v2.CNName):            {start, k8sAPIGroupCiliumNodeV2},
+	synced.CRDResourceName(cilium_v2.CNSName):           {start, k8sAPIGroupCiliumNodeSliceV2},
 	synced.CRDResourceName(cilium_v2.CIDName):           {skip, ""},                                     // Handled in pkg/k8s/identitybackend/
 	synced.CRDResourceName(cilium_v2.CLRPName):          {skip, k8sAPIGroupCiliumLocalRedirectPolicyV2}, // Handled in pkg/loadbalacer/redirectpolicy
 	synced.CRDResourceName(cilium_v2.CEGPName):          {skip, ""},                                     // Handled via Resource[T].
@@ -278,8 +280,12 @@ func (k *K8sWatcher) enableK8sWatchers(ctx context.Context, resourceNames []stri
 		case resources.K8sAPIGroupPodV1Core:
 			k.k8sPodWatcher.podsInit(ctx)
 		case k8sAPIGroupCiliumNodeV2:
+			// if !k.kcfg.IsEnabled() {
+			// 	k.k8sCiliumNodeWatcher.ciliumNodeInit(ctx)
+			// }
+		case k8sAPIGroupCiliumNodeSliceV2:
 			if !k.kcfg.IsEnabled() {
-				k.k8sCiliumNodeWatcher.ciliumNodeInit(ctx)
+				k.k8sCiliumNodeWatcher.ciliumNodeSlicesInit(ctx)
 			}
 		case k8sAPIGroupCiliumEndpointV2:
 			if !k.kcfg.IsEnabled() {

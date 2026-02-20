@@ -388,6 +388,109 @@ type CiliumNode struct {
 	Status NodeStatus `json:"status,omitempty"`
 }
 
+type CiliumNodeSliceCore struct {
+	Name string `json:"name"`
+
+	// InstanceID is the identifier of the node. This is different from the
+	// node name which is typically the FQDN of the node. The InstanceID
+	// typically refers to the identifier used by the cloud provider or
+	// some other means of identification.
+	//
+	// +kubebuilder:validation:Optional
+	InstanceID string `json:"instance-id,omitempty"`
+
+	// BootID is a unique node identifier generated on boot
+	//
+	// +kubebuilder:validation:Optional
+	BootID string `json:"bootid,omitempty"`
+
+	// Addresses is the list of all node addresses.
+	//
+	// +kubebuilder:validation:Optional
+	Addresses []NodeAddress `json:"addresses,omitempty"`
+
+	// HealthAddressing is the addressing information for health connectivity
+	// checking.
+	//
+	// +kubebuilder:validation:Optional
+	HealthAddressing HealthAddressingSpec `json:"health,omitempty"`
+
+	// IngressAddressing is the addressing information for Ingress listener.
+	//
+	// +kubebuilder:validation:Optional
+	IngressAddressing AddressPair `json:"ingress,omitempty"`
+
+	// Encryption is the encryption configuration of the node.
+	//
+	// +kubebuilder:validation:Optional
+	Encryption EncryptionSpec `json:"encryption,omitempty"`
+
+	// ENI is the AWS ENI specific configuration.
+	//
+	// +kubebuilder:validation:Optional
+	ENI eniTypes.ENISpec `json:"eni,omitempty"`
+
+	// Azure is the Azure IPAM specific configuration.
+	//
+	// +kubebuilder:validation:Optional
+	Azure azureTypes.AzureSpec `json:"azure,omitempty"`
+
+	// AlibabaCloud is the AlibabaCloud IPAM specific configuration.
+	//
+	// +kubebuilder:validation:Optional
+	AlibabaCloud alibabaCloudTypes.Spec `json:"alibaba-cloud,omitempty"`
+
+	// IPAM is the address management specification. This section can be
+	// populated by a user or it can be automatically populated by an IPAM
+	// operator.
+	//
+	// +kubebuilder:validation:Optional
+	IPAM ipamTypes.IPAMSpec `json:"ipam,omitempty"`
+
+	// NodeIdentity is the Cilium numeric identity allocated for the node, if any.
+	//
+	// +kubebuilder:validation:Optional
+	NodeIdentity uint64 `json:"nodeidentity,omitempty"`
+
+	// IPAM is the IPAM status of the node.
+	//
+	// +kubebuilder:validation:Optional
+	IPAMStatus ipamTypes.IPAMStatus `json:"ipamstatus,omitempty"`
+}
+
+// +genclient
+// +genclient:nonNamespaced
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:categories={cilium},singular="ciliumnodeslice",path="ciliumnodeslices",scope="Cluster",shortName={cnsl}
+// +kubebuilder:storageversion
+
+// CiliumNodeSlice is a list of CiliumNodeSlice objects.
+type CiliumNodeSlice struct {
+	// +deepequal-gen=false
+	metav1.TypeMeta `json:",inline"`
+	// +deepequal-gen=false
+	// +kubebuilder:validation:Required
+	metav1.ObjectMeta `json:"metadata"`
+
+	// Nodes is a list of CiliumNodeSlices
+	//
+	// +kubebuilder:validation:Required
+	Nodes []CiliumNodeSliceCore `json:"nodes"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +k8s:openapi-gen=false
+// +deepequal-gen=false
+
+// CiliumNodeSliceList is a list of CiliumNodeSlice objects.
+type CiliumNodeSliceList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata"`
+
+	// Items is a list of CiliumNodeSlice.
+	Items []CiliumNodeSlice `json:"items"`
+}
+
 // NodeAddress is a node address.
 type NodeAddress struct {
 	// Type is the type of the node address

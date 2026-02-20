@@ -24,6 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	nm "github.com/cilium/cilium/pkg/node/manager"
 	"github.com/cilium/cilium/pkg/node/types"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type k8sCiliumNodeWatcherParams struct {
@@ -33,6 +34,7 @@ type k8sCiliumNodeWatcherParams struct {
 
 	Clientset         k8sClient.Clientset
 	CiliumNode        resource.Resource[*cilium_v2.CiliumNode]
+	CiliumNodeSlice   resource.Resource[*cilium_v2.CiliumNodeSlice]
 	K8sResourceSynced *k8sSynced.Resources
 	K8sAPIGroups      *k8sSynced.APIGroups
 
@@ -46,6 +48,7 @@ func newK8sCiliumNodeWatcher(params k8sCiliumNodeWatcherParams) *K8sCiliumNodeWa
 		k8sResourceSynced: params.K8sResourceSynced,
 		k8sAPIGroups:      params.K8sAPIGroups,
 		ciliumNode:        params.CiliumNode,
+		ciliumNodeSlice:   params.CiliumNodeSlice,
 		nodeManager:       params.NodeManager,
 	}
 }
@@ -61,8 +64,9 @@ type K8sCiliumNodeWatcher struct {
 	k8sResourceSynced *k8sSynced.Resources
 	// k8sAPIGroups is a set of k8s API in use. They are setup in watchers,
 	// and may be disabled while the agent runs.
-	k8sAPIGroups *k8sSynced.APIGroups
-	ciliumNode   resource.Resource[*cilium_v2.CiliumNode]
+	k8sAPIGroups    *k8sSynced.APIGroups
+	ciliumNode      resource.Resource[*cilium_v2.CiliumNode]
+	ciliumNodeSlice resource.Resource[*cilium_v2.CiliumNodeSlice]
 
 	nodeManager nodeManager
 
@@ -70,6 +74,7 @@ type K8sCiliumNodeWatcher struct {
 }
 
 func (k *K8sCiliumNodeWatcher) ciliumNodeInit(ctx context.Context) {
+	t1 := time.Now()
 	var synced atomic.Bool
 
 	k.k8sResourceSynced.BlockWaitGroupToSyncResources(
@@ -86,6 +91,7 @@ func (k *K8sCiliumNodeWatcher) ciliumNodeInit(ctx context.Context) {
 		for event := range events {
 			switch event.Kind {
 			case resource.Sync:
+				k.logger.Info("ciliumnode synced", "duration", time.Since(t1).Milliseconds())
 				synced.Store(true)
 				k.nodeManager.NodeSync()
 
@@ -117,6 +123,86 @@ func (k *K8sCiliumNodeWatcher) ciliumNodeInit(ctx context.Context) {
 			event.Done(nil)
 		}
 	}()
+}
+
+func (k *K8sCiliumNodeWatcher) ciliumNodeSlicesInit(ctx context.Context) {
+	t1 := time.Now()
+	var synced atomic.Bool
+
+	k.k8sResourceSynced.BlockWaitGroupToSyncResources(
+		ctx.Done(),
+		nil,
+		func() bool { return synced.Load() },
+		k8sAPIGroupCiliumNodeSliceV2,
+	)
+	k.k8sAPIGroups.AddAPI(k8sAPIGroupCiliumNodeSliceV2)
+
+	go func() {
+		events := k.ciliumNodeSlice.Events(ctx)
+		cache := make(map[string]*cilium_v2.CiliumNode)
+		for event := range events {
+			switch event.Kind {
+			case resource.Sync:
+				k.logger.Info("ciliumnodeslices synced", "duration", time.Since(t1).Milliseconds())
+				synced.Store(true)
+				k.nodeManager.NodeSync()
+
+				// The informer just synchronized, so the Store call will not block.
+				store, err := k.ciliumNode.Store(ctx)
+				if err != nil {
+					if !errors.Is(err, context.Canceled) {
+						k.logger.Warn("unable to retrieve CiliumNode local store, going to query kube-apiserver directly", logfields.Error, err)
+					}
+				} else {
+					k.ciliumNodeStore.Store(&store)
+				}
+
+			case resource.Upsert:
+				// TODO: implement deletion
+				for _, node := range event.Object.Nodes {
+
+					var needUpdate bool
+					oldObj, ok := cache[node.Name]
+					if !ok {
+						needUpdate = k.onCiliumNodeInsert(ciliumNodeSliceCoreToCiliumNode(node))
+					} else {
+						needUpdate = k.onCiliumNodeUpdate(oldObj, ciliumNodeSliceCoreToCiliumNode(node))
+					}
+					if needUpdate {
+						cache[node.Name] = ciliumNodeSliceCoreToCiliumNode(node)
+					}
+				}
+			case resource.Delete:
+				for _, node := range event.Object.Nodes {
+					k.onCiliumNodeDelete(ciliumNodeSliceCoreToCiliumNode(node))
+					delete(cache, node.Name)
+				}
+			}
+			event.Done(nil)
+		}
+	}()
+}
+
+func ciliumNodeSliceCoreToCiliumNode(core cilium_v2.CiliumNodeSliceCore) *cilium_v2.CiliumNode {
+	return &cilium_v2.CiliumNode{
+		ObjectMeta: v1.ObjectMeta{
+			Name: core.Name,
+		},
+		Spec: cilium_v2.NodeSpec{
+			Addresses:         core.Addresses,
+			InstanceID:        core.InstanceID,
+			BootID:            core.BootID,
+			Azure:             core.Azure,
+			AlibabaCloud:      core.AlibabaCloud,
+			IPAM:              core.IPAM,
+			NodeIdentity:      core.NodeIdentity,
+			Encryption:        core.Encryption,
+			ENI:               core.ENI,
+			IngressAddressing: core.IngressAddressing,
+			HealthAddressing:  core.HealthAddressing,
+		},
+		Status: cilium_v2.NodeStatus{},
+	}
 }
 
 func (k *K8sCiliumNodeWatcher) onCiliumNodeInsert(ciliumNode *cilium_v2.CiliumNode) bool {

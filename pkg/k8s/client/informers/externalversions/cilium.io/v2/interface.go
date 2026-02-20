@@ -45,6 +45,8 @@ type Interface interface {
 	CiliumNodes() CiliumNodeInformer
 	// CiliumNodeConfigs returns a CiliumNodeConfigInformer.
 	CiliumNodeConfigs() CiliumNodeConfigInformer
+	// CiliumNodeSlices returns a CiliumNodeSliceInformer.
+	CiliumNodeSlices() CiliumNodeSliceInformer
 }
 
 type version struct {
@@ -141,4 +143,9 @@ func (v *version) CiliumNodes() CiliumNodeInformer {
 // CiliumNodeConfigs returns a CiliumNodeConfigInformer.
 func (v *version) CiliumNodeConfigs() CiliumNodeConfigInformer {
 	return &ciliumNodeConfigInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// CiliumNodeSlices returns a CiliumNodeSliceInformer.
+func (v *version) CiliumNodeSlices() CiliumNodeSliceInformer {
+	return &ciliumNodeSliceInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

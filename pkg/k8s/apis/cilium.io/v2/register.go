@@ -84,6 +84,12 @@ const (
 	// CNName is the full name of Cilium Node
 	CNName = CNPluralName + "." + CustomResourceDefinitionGroup
 
+	CNSPluralName = "ciliumnodeslices"
+
+	CNSKindDefinition = "CiliumNodeSlice"
+
+	CNSName = CNSPluralName + "." + CustomResourceDefinitionGroup
+
 	// Cilium Identity
 
 	// CIDPluralName is the plural name of Cilium Identity
@@ -253,6 +259,9 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&CiliumBGPNodeConfigOverrideList{},
 		&CiliumLoadBalancerIPPool{},
 		&CiliumLoadBalancerIPPoolList{},
+
+		&CiliumNode{},
+		&CiliumNodeList{},
 	)
 
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)

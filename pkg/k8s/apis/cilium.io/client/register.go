@@ -90,6 +90,8 @@ const (
 	CPIPCRDName = k8sconstv2alpha1.CPIPKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
 	// CGCCCRDName is the full name of the CiliumGatewayClassConfig CRD.
 	CGCCCRDName = k8sconstv2alpha1.CGCCKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
+
+	CNSCRDName = k8sconstv2.CNSKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
 )
 
 type CRDList struct {
@@ -184,6 +186,10 @@ func CustomResourceDefinitionList() map[string]*CRDList {
 			Name:     CGCCCRDName,
 			FullName: k8sconstv2alpha1.CGCCName,
 		},
+		synced.CRDResourceName(k8sconstv2.CNSName): {
+			Name:     CNSCRDName,
+			FullName: k8sconstv2.CNSName,
+		},
 	}
 }
 
@@ -268,6 +274,9 @@ var (
 
 	//go:embed crds/v2alpha1/ciliumgatewayclassconfigs.yaml
 	crdsv2Alpha1CiliumGatewayClassConfigs []byte
+
+	//go:embed crds/v2/ciliumnodeslices.yaml
+	crdsv2CiliumNodeSlices []byte
 )
 
 // GetPregeneratedCRD returns the pregenerated CRD based on the requested CRD
@@ -290,7 +299,7 @@ func GetPregeneratedCRD(logger *slog.Logger, crdName string) apiextensionsv1.Cus
 	case CIDCRDName:
 		crdBytes = crdsCiliumidentities
 	case CNCRDName:
-		crdBytes = crdsCiliumnodes
+		crdBytes = crdsv2CiliumNodeSlices
 	case CLRPCRDName:
 		crdBytes = crdsCiliumlocalredirectpolicies
 	case CEGPCRDName:
@@ -324,6 +333,8 @@ func GetPregeneratedCRD(logger *slog.Logger, crdName string) apiextensionsv1.Cus
 		crdBytes = crdsv2Alpha1CiliumPodIPPools
 	case CGCCCRDName:
 		crdBytes = crdsv2Alpha1CiliumGatewayClassConfigs
+	case CNSCRDName:
+		crdBytes = crdsv2CiliumNodeSlices
 	default:
 		logging.Fatal(logger, "Pregenerated CRD does not exist", logfields.CRDName, crdName)
 	}

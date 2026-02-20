@@ -1,0 +1,48 @@
+apiVersion: cilium.io/v2
+kind: CiliumNodeSlice
+metadata:
+  name: example-ciliumnodeslice-1
+spec:
+  items:
+    - name: node1-example # Required field within each item
+      addresses:
+        - ip: "192.168.1.10"
+          type: "InternalIP"
+        - ip: "10.0.0.1"
+          type: "ExternalIP"
+      bootid: "abcdef1234567890"
+      instance-id: "i-0123456789abcdef0"
+      health:
+        ipv4: "192.168.1.10:4240"
+      ipam:
+        podCIDRs:
+          - "10.1.0.0/24"
+        pool:
+          "10.1.0.1":
+            owner: "kube-dns-12345"
+            resource: "pod/kube-dns-12345"
+          "10.1.0.2": {} # Available IP
+        pools:
+          allocated:
+            - pool: "default-ipv4-pool"
+              cidrs:
+                - "10.1.0.0/24"
+          requested:
+            - pool: "default-ipv4-pool"
+              needed:
+                ipv4-addrs: 254
+      ipamstatus:
+        assigned-static-ip: "10.0.0.1"
+        used:
+          "10.1.0.1":
+            owner: "kube-dns-12345"
+            resource: "pod/kube-dns-12345"
+    - name: node2-example # Another required item
+      addresses:
+        - ip: "192.168.1.11"
+          type: "InternalIP"
+      bootid: "fedcba0987654321"
+      instance-id: "i-0fedcba0987654321"
+      ipam:
+        podCIDRs:
+          - "10.2.0.0/24"
