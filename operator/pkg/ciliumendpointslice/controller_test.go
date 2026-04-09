@@ -42,7 +42,9 @@ func TestRegisterController(t *testing.T) {
 		ipsec.OperatorCell,
 		wgAgent.OperatorCell,
 		cell.Provide(func() Config {
-			return defaultConfig
+			cfg := defaultConfig
+			cfg.CESControllerMode = defaultMode
+			return cfg
 		}),
 		cell.Provide(func() SharedConfig {
 			return SharedConfig{

@@ -1199,6 +1199,42 @@ func (e *Endpoint) SetIdentity(identity *identityPkg.Identity) (identityToReleas
 	return identityToRelease
 }
 
+// UpdateIdentityFromCES updates the endpoint's identity directly from a CES update
+// if the endpoint is currently in init state or has a different identity.
+// It handles locking and triggers regeneration.
+func (e *Endpoint) UpdateIdentityFromCES(identity *identityPkg.Identity) {
+	if err := e.lockAlive(); err != nil {
+		return
+	}
+
+	if e.SecurityIdentity != nil && e.SecurityIdentity.ID == identity.ID {
+		e.unlock()
+		return // Already has it
+	}
+
+	e.getLogger().Info("Updating identity from CES directly", "newId", identity.ID, "oldId", e.getIdentity())
+
+	identityToRelease := e.SetIdentity(identity)
+	e.unlock()
+
+	if identityToRelease != nil {
+		_, err := e.allocator.Release(context.Background(), identityToRelease, false)
+		if err != nil {
+			e.getLogger().Warn(
+				"Unable to release old endpoint identity",
+				logfields.Error, err,
+				logfields.IdentityOld, identityToRelease.ID,
+			)
+		}
+	}
+
+	e.RegenerateIfAlive(&regeneration.ExternalRegenerationMetadata{
+		Reason:            regeneration.ReasonLabelsUpdate,
+		Message:           "identity resolved from CES",
+		RegenerationLevel: regeneration.RegenerateWithDatapath,
+	})
+}
+
 // UpdateNoTrackRules updates the NOTRACK iptable rules for this endpoint. If noTrackPort
 // is empty, then any existing NOTRACK rules will be removed.
 func (e *Endpoint) UpdateNoTrackRules(noTrackPort string) {

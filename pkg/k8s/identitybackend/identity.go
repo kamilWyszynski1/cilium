@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/idpool"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	v2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
 	"github.com/cilium/cilium/pkg/k8s/informer"
 	k8sUtils "github.com/cilium/cilium/pkg/k8s/utils"
@@ -340,12 +341,22 @@ func (c *crdBackend) Release(ctx context.Context, id idpool.ID, key allocator.Al
 
 func getIdentitiesByKeyFunc(keyFunc func(map[string]string) allocator.AllocatorKey) func(obj any) ([]string, error) {
 	return func(obj any) ([]string, error) {
+		fmt.Println("getIdentitiesByKeyFunc", obj)
 		if identity, ok := obj.(*v2.CiliumIdentity); ok {
 			return []string{keyFunc(identity.SecurityLabels).GetKey()}, nil
 		}
 		return []string{}, fmt.Errorf("object other than CiliumIdentity was pushed to the store")
 	}
 }
+
+// func getIdentitiesFromCESByKeyFunc(keyFunc func(map[string]string) allocator.AllocatorKey) func(obj any) ([]string, error) {
+// 	return func(obj any) ([]string, error) {
+// 		if identity, ok := obj.(*v2alpha1.CiliumEndpointSlice); ok {
+// 			return []string{keyFunc(identity.SecurityLabels).GetKey()}, nil
+// 		}
+// 		return []string{}, fmt.Errorf("object other than CiliumIdentity was pushed to the store")
+// 	}
+// }
 
 func (c *crdBackend) ListIDs(ctx context.Context) (identityIDs []idpool.ID, err error) {
 	if !c.StoreSet.Load() {
@@ -370,52 +381,178 @@ func (c *crdBackend) ListAndWatch(ctx context.Context, handler allocator.CacheMu
 	c.Store = cache.NewIndexer(
 		cache.DeletionHandlingMetaNamespaceKeyFunc,
 		cache.Indexers{byKeyIndex: getIdentitiesByKeyFunc(c.KeyFunc)})
-	identityInformer := informer.NewInformerWithStore(
-		k8sUtils.ListerWatcherFromTyped[*v2.CiliumIdentityList](c.Client.CiliumV2().CiliumIdentities()),
-		&v2.CiliumIdentity{},
-		0,
-		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj any) {
-				if identity, ok := obj.(*v2.CiliumIdentity); ok {
-					if id, err := strconv.ParseUint(identity.Name, 10, 64); err == nil {
-						handler.OnUpsert(idpool.ID(id), c.KeyFunc(identity.SecurityLabels))
-					}
-				}
-			},
-			UpdateFunc: func(oldObj, newObj any) {
-				if oldIdentity, ok := oldObj.(*v2.CiliumIdentity); ok {
-					if newIdentity, ok := newObj.(*v2.CiliumIdentity); ok {
-						if oldIdentity.DeepEqual(newIdentity) {
-							return
-						}
-						if id, err := strconv.ParseUint(newIdentity.Name, 10, 64); err == nil {
-							handler.OnUpsert(idpool.ID(id), c.KeyFunc(newIdentity.SecurityLabels))
-						}
-					}
-				}
-			},
-			DeleteFunc: func(obj any) {
-				// The delete event is sometimes for items with unknown state that are
-				// deleted anyway.
-				if deleteObj, isDeleteObj := obj.(cache.DeletedFinalStateUnknown); isDeleteObj {
-					obj = deleteObj.Obj
-				}
 
-				if identity, ok := obj.(*v2.CiliumIdentity); ok {
-					if id, err := strconv.ParseUint(identity.Name, 10, 64); err == nil {
-						handler.OnDelete(idpool.ID(id), c.KeyFunc(identity.SecurityLabels))
+	var identityInformer cache.Controller
+	if true {
+		cesStore := cache.NewIndexer(
+			cache.DeletionHandlingMetaNamespaceKeyFunc,
+			cache.Indexers{
+				"by-identity-id": func(obj any) ([]string, error) {
+					ces, ok := obj.(*v2alpha1.CiliumEndpointSlice)
+					if !ok {
+						return []string{}, fmt.Errorf("not a CES")
 					}
-				} else {
-					c.logger.Debug(
-						"Ignoring unknown delete event",
-						logfields.Object, obj,
-					)
-				}
+					ids := []string{}
+					for _, endp := range ces.Endpoints {
+						ids = append(ids, strconv.FormatInt(endp.IdentityID, 10))
+					}
+					return ids, nil
+				},
+			})
+
+		c.logger.Info("Starting CES informer")
+		identityInformer = informer.NewInformerWithStore(
+			k8sUtils.ListerWatcherFromTyped[*v2alpha1.CiliumEndpointSliceList](c.Client.CiliumV2alpha1().CiliumEndpointSlices()),
+			&v2alpha1.CiliumEndpointSlice{},
+			0,
+			cache.ResourceEventHandlerFuncs{
+				AddFunc: func(obj any) {
+					if ces, ok := obj.(*v2alpha1.CiliumEndpointSlice); ok {
+						c.logger.Debug("AddFunc", logfields.Object, ces)
+						for _, endp := range ces.Endpoints {
+							c.logger.Debug("AddFunc single endpoint", logfields.Object, endp)
+							idStr := strconv.FormatInt(endp.IdentityID, 10)
+							handler.OnUpsert(idpool.ID(endp.IdentityID), c.KeyFunc(ces.Labels[idStr].Labels))
+
+							if err := c.Store.Add(&v2.CiliumIdentity{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: idStr,
+								},
+								SecurityLabels: ces.Labels[idStr].Labels,
+							}); err != nil {
+								c.logger.Error("Failed to add identity to store", logfields.Error, err, logfields.Identity, endp.IdentityID)
+							}
+						}
+						c.logger.Debug("Store keys after add", "keys", c.Store.ListKeys())
+					}
+				},
+				UpdateFunc: func(oldObj, newObj any) {
+					c.logger.Debug("UpdateFunc", logfields.Object, oldObj, logfields.Object, newObj)
+					if oldCES, ok := oldObj.(*v2alpha1.CiliumEndpointSlice); ok {
+						if newCES, ok := newObj.(*v2alpha1.CiliumEndpointSlice); ok {
+							if oldCES.DeepEqual(newCES) {
+								return
+							}
+
+							newMap := map[int64]struct{}{}
+							for _, endp := range newCES.Endpoints {
+								newMap[endp.IdentityID] = struct{}{}
+								idStr := strconv.FormatInt(endp.IdentityID, 10)
+								handler.OnUpsert(idpool.ID(endp.IdentityID), c.KeyFunc(newCES.Labels[idStr].Labels))
+
+								if err := c.Store.Add(&v2.CiliumIdentity{
+									ObjectMeta: metav1.ObjectMeta{
+										Name: idStr,
+									},
+									SecurityLabels: newCES.Labels[idStr].Labels,
+								}); err != nil {
+									c.logger.Error("Failed to add identity to store", logfields.Error, err, logfields.Identity, endp.IdentityID)
+								}
+							}
+
+							// delete diff
+							for _, endp := range oldCES.Endpoints {
+								if _, ok := newMap[endp.IdentityID]; !ok {
+									idStr := strconv.FormatInt(endp.IdentityID, 10)
+									handler.OnDelete(idpool.ID(endp.IdentityID), c.KeyFunc(oldCES.Labels[idStr].Labels))
+
+									cesList, err := cesStore.ByIndex("by-identity-id", idStr)
+									if err == nil && len(cesList) == 0 {
+										if err := c.Store.Delete(&v2.CiliumIdentity{
+											ObjectMeta: metav1.ObjectMeta{
+												Name: idStr,
+											},
+										}); err != nil {
+											c.logger.Error("Failed to delete identity from store", logfields.Error, err, logfields.Identity, endp.IdentityID)
+										}
+									}
+								}
+							}
+						}
+					}
+				},
+				DeleteFunc: func(obj any) {
+					c.logger.Debug("DeleteFunc", logfields.Object, obj)
+					if deleteObj, isDeleteObj := obj.(cache.DeletedFinalStateUnknown); isDeleteObj {
+						obj = deleteObj.Obj
+					}
+
+					if ces, ok := obj.(*v2alpha1.CiliumEndpointSlice); ok {
+						for _, endp := range ces.Endpoints {
+							idStr := strconv.FormatInt(endp.IdentityID, 10)
+							handler.OnDelete(idpool.ID(endp.IdentityID), c.KeyFunc(ces.Labels[idStr].Labels))
+
+							cesList, err := cesStore.ByIndex("by-identity-id", idStr)
+							if err == nil && len(cesList) == 0 {
+								if err := c.Store.Delete(&v2.CiliumIdentity{
+									ObjectMeta: metav1.ObjectMeta{
+										Name: idStr,
+									},
+								}); err != nil {
+									c.logger.Error("Failed to delete identity from store", logfields.Error, err, logfields.Identity, endp.IdentityID)
+								}
+							}
+						}
+					} else {
+						c.logger.Debug(
+							"Ignoring unknown delete event",
+							logfields.Object, obj,
+						)
+					}
+				},
 			},
-		},
-		nil,
-		c.Store,
-	)
+			nil,
+			cesStore,
+		)
+	} else {
+
+		identityInformer = informer.NewInformerWithStore(
+			k8sUtils.ListerWatcherFromTyped[*v2.CiliumIdentityList](c.Client.CiliumV2().CiliumIdentities()),
+			&v2.CiliumIdentity{},
+			0,
+			cache.ResourceEventHandlerFuncs{
+				AddFunc: func(obj any) {
+					if identity, ok := obj.(*v2.CiliumIdentity); ok {
+						if id, err := strconv.ParseUint(identity.Name, 10, 64); err == nil {
+							handler.OnUpsert(idpool.ID(id), c.KeyFunc(identity.SecurityLabels))
+						}
+					}
+				},
+				UpdateFunc: func(oldObj, newObj any) {
+					if oldIdentity, ok := oldObj.(*v2.CiliumIdentity); ok {
+						if newIdentity, ok := newObj.(*v2.CiliumIdentity); ok {
+							if oldIdentity.DeepEqual(newIdentity) {
+								return
+							}
+							if id, err := strconv.ParseUint(newIdentity.Name, 10, 64); err == nil {
+								handler.OnUpsert(idpool.ID(id), c.KeyFunc(newIdentity.SecurityLabels))
+							}
+						}
+					}
+				},
+				DeleteFunc: func(obj any) {
+					// The delete event is sometimes for items with unknown state that are
+					// deleted anyway.
+					if deleteObj, isDeleteObj := obj.(cache.DeletedFinalStateUnknown); isDeleteObj {
+						obj = deleteObj.Obj
+					}
+
+					if identity, ok := obj.(*v2.CiliumIdentity); ok {
+						if id, err := strconv.ParseUint(identity.Name, 10, 64); err == nil {
+							handler.OnDelete(idpool.ID(id), c.KeyFunc(identity.SecurityLabels))
+						}
+					} else {
+						c.logger.Debug(
+							"Ignoring unknown delete event",
+							logfields.Object, obj,
+						)
+					}
+				},
+			},
+			nil,
+			c.Store,
+		)
+	}
 
 	go func() {
 		if ok := cache.WaitForCacheSync(ctx.Done(), identityInformer.HasSynced); ok {

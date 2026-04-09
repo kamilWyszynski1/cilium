@@ -23,14 +23,17 @@ var Cell = cell.Module(
 
 type config struct {
 	IdentityManagementMode string `mapstructure:"identity-management-mode"`
+	EnableCIDFromCES       bool   `mapstructure:"enable-cid-from-ces"`
 }
 
 func (c config) Flags(flags *pflag.FlagSet) {
 	flags.String(option.IdentityManagementMode, c.IdentityManagementMode, "Configure whether Cilium Identities are managed by cilium-agent, cilium-operator, or both")
+	flags.Bool("enable-cid-from-ces", c.EnableCIDFromCES, "Enable CiliumIdentity generation from CiliumEndpointSlice")
 }
 
 var defaultConfig = config{
 	IdentityManagementMode: option.IdentityManagementModeAgent,
+	EnableCIDFromCES:       true,
 }
 
 // SharedConfig contains the configuration that is shared between

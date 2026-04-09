@@ -59,6 +59,13 @@ func NewSecIDs() *SecIDs {
 	}
 }
 
+func (c *CESCache) GetCIDForLabels(gidLabels Labels) (CID, bool) {
+	if secId, ok := c.globalIdLabelsToCIDSet[gidLabels]; ok {
+		return secId.selectedID, true
+	}
+	return "", false
+}
+
 // CEPData contains the CES, node and labels associated with the corecep.
 type CEPData struct {
 	ces    CESName

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"strconv"
+	"strings"
 
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -31,7 +32,7 @@ type doReconciler interface {
 }
 
 type endpointGetter interface {
-	getCoreEndpointFromStore(cepName CEPName) *cilium_v2a1.CoreCiliumEndpoint
+	getCoreEndpointFromStore(cepName CEPName) (*cilium_v2a1.CoreCiliumEndpoint, map[string]string)
 }
 
 // reconciler is used to sync the current (i.e. desired) state of the CESs in datastore into current state CESs in the k8s-apiserver.
@@ -171,18 +172,23 @@ func (r *reconciler) reconcileCESCreate(cesName CESName) (err error) {
 			Name: cesName.string(),
 		},
 		Endpoints: make([]cilium_v2a1.CoreCiliumEndpoint, 0, len(ceps)),
+		Labels:    make(map[string]cilium_v2a1.IdentityLabels),
 	}
 
 	newCES.Namespace = r.cesManager.getCESNamespace(cesName)
 
 	for _, cepName := range ceps {
-		ccep := r.endpointGetter.getCoreEndpointFromStore(cepName)
+		ccep, securityLabels := r.endpointGetter.getCoreEndpointFromStore(cepName)
 		r.logger.DebugContext(r.context,
 			fmt.Sprintf("Adding CEP to new CES (exist %v)", ccep != nil),
 			logfields.CESName, cesName.string(),
 			logfields.CEPName, cepName.string())
 		if ccep != nil {
 			newCES.Endpoints = append(newCES.Endpoints, *ccep)
+			if len(securityLabels) > 0 {
+				idStr := strconv.FormatInt(ccep.IdentityID, 10)
+				newCES.Labels[idStr] = cilium_v2a1.IdentityLabels{Labels: securityLabels}
+			}
 		}
 	}
 
@@ -209,10 +215,11 @@ func (r *reconciler) reconcileCESUpdate(cesName CESName, cesObj *cilium_v2a1.Cil
 	cepsAssignedToCES := r.cesManager.getCEPinCES(cesName)
 	// Final endpoints list. CES endpoints will be set to this list.
 	updatedEndpoints := make([]cilium_v2a1.CoreCiliumEndpoint, 0, len(cepsAssignedToCES))
+	updatedLabels := make(map[string]cilium_v2a1.IdentityLabels)
 	cepNameToCEP := make(map[CEPName]*cilium_v2a1.CoreCiliumEndpoint)
 	// Get the CEPs objects from the CEP Store and map the names to them
 	for _, cepName := range cepsAssignedToCES {
-		ccep := r.endpointGetter.getCoreEndpointFromStore(cepName)
+		ccep, securityLabels := r.endpointGetter.getCoreEndpointFromStore(cepName)
 		r.logger.DebugContext(r.context,
 			fmt.Sprintf("Adding CEP to existing CES (exist %v)", ccep != nil),
 			logfields.CESName, cesName.string(),
@@ -220,6 +227,10 @@ func (r *reconciler) reconcileCESUpdate(cesName CESName, cesObj *cilium_v2a1.Cil
 		if ccep != nil {
 			updatedEndpoints = append(updatedEndpoints, *ccep)
 			cepNameToCEP[cepName] = ccep
+			if len(securityLabels) > 0 {
+				idStr := strconv.FormatInt(ccep.IdentityID, 10)
+				updatedLabels[idStr] = cilium_v2a1.IdentityLabels{Labels: securityLabels}
+			}
 		}
 		cepInserted = cepInserted + 1
 	}
@@ -237,6 +248,7 @@ func (r *reconciler) reconcileCESUpdate(cesName CESName, cesObj *cilium_v2a1.Cil
 		}
 	}
 	updatedCES.Endpoints = updatedEndpoints
+	updatedCES.Labels = updatedLabels
 	r.logger.DebugContext(r.context,
 		fmt.Sprintf("Inserted %d endpoints, updated %d endpoints, removed %d endpoints",
 			cepInserted,
@@ -286,19 +298,32 @@ func (r *reconciler) reconcileCESDelete(ces *cilium_v2a1.CiliumEndpointSlice) (e
 	return
 }
 
-func (r *defaultReconciler) getCoreEndpointFromStore(cepName CEPName) *cilium_v2a1.CoreCiliumEndpoint {
+func (r *defaultReconciler) getCoreEndpointFromStore(cepName CEPName) (*cilium_v2a1.CoreCiliumEndpoint, map[string]string) {
 	cepObj, exists, err := r.cepStore.GetByKey(cepName.key())
 	if err == nil && exists {
-		return k8s.ConvertCEPToCoreCEP(cepObj)
+		ccep := k8s.ConvertCEPToCoreCEP(cepObj)
+		var securityLabels map[string]string
+		if cepObj.Status.Identity != nil && len(cepObj.Status.Identity.Labels) > 0 {
+			securityLabels = make(map[string]string, len(cepObj.Status.Identity.Labels))
+			for _, l := range cepObj.Status.Identity.Labels {
+				parts := strings.SplitN(l, "=", 2)
+				if len(parts) == 2 {
+					securityLabels[parts[0]] = parts[1]
+				} else {
+					securityLabels[parts[0]] = ""
+				}
+			}
+		}
+		return ccep, securityLabels
 	}
 	r.logger.DebugContext(r.context,
 		fmt.Sprintf("Couldn't get CEP from Store (err=%v, exists=%v)", err, exists),
 		logfields.CEPName, cepName.string(),
 	)
-	return nil
+	return nil, nil
 }
 
-func (r *slimReconciler) getCoreEndpointFromStore(cepName CEPName) *cilium_v2a1.CoreCiliumEndpoint {
+func (r *slimReconciler) getCoreEndpointFromStore(cepName CEPName) (*cilium_v2a1.CoreCiliumEndpoint, map[string]string) {
 	podObj, exists, err := r.podStore.GetByKey(cepName.key())
 	if err == nil && exists {
 		return r.convertPodToCoreCEP(podObj)
@@ -309,7 +334,7 @@ func (r *slimReconciler) getCoreEndpointFromStore(cepName CEPName) *cilium_v2a1.
 		logfields.Exists, exists,
 		logfields.CEPName, cepName.string(),
 	)
-	return nil
+	return nil, nil
 }
 
 // Converts a Pod to a CoreCiliumEndpoint object. Returns nil if no CID has been assigned
@@ -319,15 +344,15 @@ func (r *slimReconciler) getCoreEndpointFromStore(cepName CEPName) *cilium_v2a1.
 // However, in the case of the CID, we used the
 // cached selectedID from the local cescache, in order to reduce churn when duplicate
 // CIDs exist for the same set of labels.
-func (r *slimReconciler) convertPodToCoreCEP(pod *slim_corev1.Pod) *cilium_v2a1.CoreCiliumEndpoint {
-	identityId, err := r.getPodIdentityIDFromCache(pod)
+func (r *slimReconciler) convertPodToCoreCEP(pod *slim_corev1.Pod) (*cilium_v2a1.CoreCiliumEndpoint, map[string]string) {
+	identityId, securityLabels, err := r.getPodIdentityFromCache(pod)
 	if err != nil {
-		r.logger.DebugContext(r.context, "Could not get pod identity ID",
+		r.logger.DebugContext(r.context, "Could not get pod identity",
 			logfields.K8sPodName, pod.GetName(),
 			logfields.K8sNamespace, pod.Namespace,
 			logfields.Error, err,
 		)
-		return nil
+		return nil, nil
 	}
 
 	networking, err := GetPodEndpointNetworking(pod)
@@ -337,7 +362,7 @@ func (r *slimReconciler) convertPodToCoreCEP(pod *slim_corev1.Pod) *cilium_v2a1.
 			logfields.K8sNamespace, pod.Namespace,
 			logfields.Error, err,
 		)
-		return nil
+		return nil, nil
 	}
 
 	encryptionKey, err := r.getEndpointEncryptionKey(pod)
@@ -347,35 +372,42 @@ func (r *slimReconciler) convertPodToCoreCEP(pod *slim_corev1.Pod) *cilium_v2a1.
 			logfields.K8sNamespace, pod.Namespace,
 			logfields.Error, err,
 		)
-		return nil
+		return nil, nil
 	}
 
 	namedPorts := r.getNamedPorts(pod)
 
 	return &cilium_v2a1.CoreCiliumEndpoint{
-		Name:       pod.GetName(),
-		IdentityID: identityId,
-		PodUID:     string(pod.UID),
-		Networking: networking,
+		Name:           pod.GetName(),
+		IdentityID:     identityId,
+		PodUID:         string(pod.UID),
+		Networking:     networking,
 		Encryption: cilium_v2.EncryptionSpec{
 			Key: encryptionKey,
 		},
 		NamedPorts:     namedPorts,
 		ServiceAccount: pod.Spec.ServiceAccountName,
-	}
+	}, securityLabels
 }
 
-// Get the identity ID for a given pod, from the local cescache.
-func (r *slimReconciler) getPodIdentityIDFromCache(pod *slim_corev1.Pod) (int64, error) {
+// Get the identity ID and labels for a given pod, from the local cescache.
+func (r *slimReconciler) getPodIdentityFromCache(pod *slim_corev1.Pod) (int64, map[string]string, error) {
 	cid, exists := r.manager.getCIDForCEP(GetCEPNameFromPod(pod))
 	if !exists {
-		return 0, fmt.Errorf("pod %s/%s has no known identity", pod.Namespace, pod.Name)
+		return 0, nil, fmt.Errorf("pod %s/%s has no known identity", pod.Namespace, pod.Name)
 	}
 	identityId, err := strconv.ParseInt(string(cid), 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse CID %s name for pod %s/%s: %w", cid, pod.Namespace, pod.Name, err)
+		return 0, nil, fmt.Errorf("failed to parse CID %s name for pod %s/%s: %w", cid, pod.Namespace, pod.Name, err)
 	}
-	return identityId, nil
+
+	k8sLabels, err := ciliumidentity.GetRelevantLabelsForPod(r.logger, pod, r.namespaceStore)
+	if err != nil {
+		return identityId, nil, fmt.Errorf("failed to get relevant labels for pod: %w", err)
+	}
+
+	cidKey := key.GetCIDKeyFromLabels(k8sLabels, labels.LabelSourceK8s)
+	return identityId, cidKey.GetAsMap(), nil
 }
 
 // Constructs an EndpointNetworking object for a given pod.

@@ -688,8 +688,10 @@ func (a *Allocator) Allocate(ctx context.Context, key AllocatorKey) (idpool.ID, 
 		return 0, false, false, fmt.Errorf("allocation was cancelled while waiting for initial key list to be received: %w", ctx.Err())
 	}
 
+	a.logger.Info("Allocate: Checking operatorIDManagement", "enabled", a.operatorIDManagement, "key", key.String())
 	if a.operatorIDManagement {
 		id, err := a.GetWithRetry(ctx, key)
+		a.logger.Info("Allocate: GetWithRetry result", "id", id, "err", err)
 		// The second and third return values are always false when
 		// operatorIDManagement is enabled because cilium-operator manages security
 		// IDs, and they are never newly allocated or require holding a reference to
@@ -965,6 +967,11 @@ func (a *Allocator) RunLocksGC(ctx context.Context, staleLocksPrevRound map[stri
 // DeleteAllKeys will delete all keys. It is expected to be used in tests.
 func (a *Allocator) DeleteAllKeys() {
 	a.backend.DeleteAllKeys(context.TODO())
+}
+
+// Inject tells the cache about a key to ID mapping that was created externally.
+func (a *Allocator) Inject(id idpool.ID, key AllocatorKey) {
+	a.mainCache.OnUpsert(id, key)
 }
 
 // syncLocalKeys checks the kvstore and verifies that a master key exists for

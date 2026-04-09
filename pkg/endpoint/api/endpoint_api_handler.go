@@ -237,6 +237,7 @@ func validPatchTransitionState(state *models.EndpointState) bool {
 }
 
 func (h *EndpointPatchEndpointIDHandler) Handle(params endpointapi.PatchEndpointIDParams) middleware.Responder {
+	return endpointapi.NewPatchEndpointIDOK()
 	scopedLog := h.logger.With(logfields.Params, params)
 	if ep := params.Endpoint; ep != nil {
 		scopedLog = scopedLog.With(logfields.Endpoint, *ep)

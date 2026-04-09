@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"strconv"
 
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpointmanager"
@@ -92,7 +93,8 @@ func (ops *EnrollmentReconciler) emitEndpointEvents(ctx context.Context, namespa
 
 		for _, ces := range slices {
 			for _, coreCep := range ces.Endpoints {
-				cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&coreCep, ces.Namespace)
+				idStr := strconv.FormatInt(coreCep.IdentityID, 10)
+				cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&coreCep, ces.Namespace, ces.Labels[idStr].Labels)
 				select {
 				case ops.endpointEventCh <- &xds.EndpointEvent{
 					Type:           eventType,

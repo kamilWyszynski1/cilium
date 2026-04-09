@@ -22,3 +22,6 @@ readinessProbe:
   failureThreshold: 9999
 startupProbe:
   failureThreshold: 9999
+ciliumEndpointSlice:
+  enabled: true
+identityManagementMode: "operator"

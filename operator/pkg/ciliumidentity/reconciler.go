@@ -41,9 +41,10 @@ type reconciler struct {
 	cidUsageInCES   *CIDUsageInCES
 	// Ensures no CID duplicates are created while allocating CIDs in parallel,
 	// (that is, when processing a pod event and a CID event concurrently).
-	cidCreateLock lock.RWMutex
-	cesEnabled    bool
-	queueOps      queueOperation
+	cidCreateLock    lock.RWMutex
+	cesEnabled       bool
+	enableCIDFromCES bool
+	queueOps         queueOperation
 
 	nsStore  resource.Store[*slim_corev1.Namespace]
 	podStore resource.Store[*slim_corev1.Pod]
@@ -62,6 +63,7 @@ func newReconciler(
 	ciliumEndpoint resource.Resource[*cilium_api_v2.CiliumEndpoint],
 	ciliumEndpointSlice resource.Resource[*v2alpha1.CiliumEndpointSlice],
 	cesEnabled bool,
+	enableCIDFromCES bool,
 	queueOps queueOperation,
 ) (*reconciler, error) {
 	logger.InfoContext(ctx, "Creating CID controller Operator reconciler")
@@ -96,20 +98,21 @@ func newReconciler(
 	}
 
 	r := &reconciler{
-		logger:          logger,
-		ctx:             ctx,
-		clientset:       clientset,
-		idAllocator:     idAllocator,
-		desiredCIDState: NewCIDState(logger),
-		cidUsageInPods:  NewCIDUsageInPods(),
-		cidUsageInCES:   NewCIDUsageInCES(),
-		queueOps:        queueOps,
-		nsStore:         nsStore,
-		podStore:        podStore,
-		cidStore:        cidStore,
-		cepStore:        cepStore,
-		cesStore:        cesStore,
-		cesEnabled:      cesEnabled,
+		logger:           logger,
+		ctx:              ctx,
+		clientset:        clientset,
+		idAllocator:      idAllocator,
+		desiredCIDState:  NewCIDState(logger),
+		cidUsageInPods:   NewCIDUsageInPods(),
+		cidUsageInCES:    NewCIDUsageInCES(),
+		queueOps:         queueOps,
+		nsStore:          nsStore,
+		podStore:         podStore,
+		cidStore:         cidStore,
+		cepStore:         cepStore,
+		cesStore:         cesStore,
+		cesEnabled:       cesEnabled,
+		enableCIDFromCES: enableCIDFromCES,
 	}
 
 	return r, nil
@@ -156,6 +159,10 @@ func (r *reconciler) reconcileCID(cidResourceKey resource.Key) error {
 
 	if !existsInStore {
 		if cidIsUsed {
+			if r.enableCIDFromCES {
+				r.logger.Debug("Skipping CiliumIdentity creation when CID from CES is enabled", logfields.CIDName, cidName)
+				return nil
+			}
 			return r.createCID(cidName, cidKey)
 		} else {
 			if err := r.makeIDAvailable(cidName); err != nil {

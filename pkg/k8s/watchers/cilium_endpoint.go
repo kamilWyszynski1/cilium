@@ -15,11 +15,14 @@ import (
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	hubblemetrics "github.com/cilium/cilium/pkg/hubble/metrics"
 	"github.com/cilium/cilium/pkg/identity"
+	identitycell "github.com/cilium/cilium/pkg/identity/cache/cell"
+	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/ipcache"
 	cilium_api_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/k8s/types"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
@@ -41,12 +44,13 @@ type k8sCiliumEndpointsWatcherParams struct {
 	K8sResourceSynced   *k8sSynced.Resources
 	K8sAPIGroups        *k8sSynced.APIGroups
 
-	EndpointManager endpointmanager.EndpointManager
-	PolicyUpdater   *policy.Updater
-	IPCache         *ipcache.IPCache
-	WgConfig        wgTypes.WireguardConfig
-	IPSecConfig     datapath.IPsecConfig
-	LocalNodeStore  *node.LocalNodeStore
+	EndpointManager   endpointmanager.EndpointManager
+	PolicyUpdater     *policy.Updater
+	IPCache           *ipcache.IPCache
+	WgConfig          wgTypes.WireguardConfig
+	IPSecConfig       datapath.IPsecConfig
+	LocalNodeStore    *node.LocalNodeStore
+	IdentityAllocator identitycell.CachingIdentityAllocator
 }
 
 func newK8sCiliumEndpointsWatcher(params k8sCiliumEndpointsWatcherParams) *K8sCiliumEndpointsWatcher {
@@ -62,6 +66,7 @@ func newK8sCiliumEndpointsWatcher(params k8sCiliumEndpointsWatcherParams) *K8sCi
 		wgConfig:            params.WgConfig,
 		ipsecConfig:         params.IPSecConfig,
 		localNodeStore:      params.LocalNodeStore,
+		identityAllocator:   params.IdentityAllocator,
 	}
 }
 
@@ -85,6 +90,8 @@ type K8sCiliumEndpointsWatcher struct {
 
 	ciliumSlimEndpoint  resource.Resource[*types.CiliumEndpoint]
 	ciliumEndpointSlice resource.Resource[*cilium_api_v2a1.CiliumEndpointSlice]
+
+	identityAllocator identitycell.CachingIdentityAllocator
 }
 
 // initCiliumEndpointOrSlices initializes the ciliumEndpoints or ciliumEndpointSlice
@@ -194,8 +201,44 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 	id := identity.ReservedIdentityUnmanaged
 	if endpoint.Identity != nil {
 		id = identity.NumericIdentity(endpoint.Identity.ID)
+
+		if len(endpoint.Identity.Labels) > 0 {
+			k.logger.Debug("Injecting labels", logfields.Identity, id, "labels", endpoint.Identity.Labels)
+			if k.identityAllocator != nil {
+				k.logger.Debug("Injecting labels with identityAllocator", logfields.Identity, id, "labels", endpoint.Identity.Labels)
+				importIdentity := identity.NumericIdentity(endpoint.Identity.ID)
+				k.identityAllocator.InjectLabels(idpool.ID(importIdentity), labels.NewLabelsFromModel(endpoint.Identity.Labels))
+			}
+		}
 	}
 
+	namespacedName := endpoint.Namespace + "/" + endpoint.Name
+	k.logger.Info("endpointUpdated: Checking local endpoint", "namespacedName", namespacedName)
+	if ep := k.endpointManager.LookupCEPName(namespacedName); ep != nil {
+		k.logger.Info("endpointUpdated: Found local endpoint", "namespacedName", namespacedName, "currentIdentity", ep.GetIdentity())
+		if endpoint.Identity != nil {
+			newId := identity.NumericIdentity(endpoint.Identity.ID)
+			k.logger.Info("endpointUpdated: CES identity available", "newId", newId)
+			if ep.GetIdentity() == identity.ReservedIdentityInit && newId != identity.ReservedIdentityInit {
+				k.logger.Info("endpointUpdated: Attempting to resolve identity from cache", "newId", newId)
+				if idObj := k.identityAllocator.LookupIdentityByID(context.TODO(), newId); idObj != nil {
+					k.logger.Info("endpointUpdated: Found identity in cache, setting directly on endpoint", "id", newId, "namespacedName", namespacedName)
+					ep.UpdateIdentityFromCES(idObj)
+				} else {
+					k.logger.Warn("Identity not found in cache after inject, falling back to UpdateLabels", "id", newId)
+					lbls := labels.NewLabelsFromModel(endpoint.Identity.Labels)
+					ep.UpdateLabels(context.TODO(), labels.LabelSourceAny, lbls, nil, false)
+				}
+			} else {
+				k.logger.Info("endpointUpdated: Not transitioning from init", 
+					"namespacedName", namespacedName, 
+					"currentIdentity", ep.GetIdentity(), 
+					"newId", newId)
+			}
+		}
+	} else {
+		k.logger.Debug("endpointUpdated: Local endpoint not found", "namespacedName", namespacedName)
+	}
 	if endpoint.Networking == nil || endpoint.Networking.NodeIP == "" {
 		k.logger.Warn("NodeIP not available", logfields.Identity, id)
 		// When upgrading from an older version, the nodeIP may

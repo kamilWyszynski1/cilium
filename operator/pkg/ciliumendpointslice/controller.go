@@ -16,12 +16,16 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
+	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/identity/basicallocator"
+	"github.com/cilium/cilium/pkg/idpool"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/option"
 	wgAgent "github.com/cilium/cilium/pkg/wireguard/agent"
 )
 
@@ -133,6 +137,7 @@ type SlimController struct {
 
 	ciliumIdentity resource.Resource[*v2.CiliumIdentity]
 	pods           resource.Resource[*slim_corev1.Pod]
+	idAllocator    *basicallocator.BasicIDAllocator
 }
 
 // registerController creates and initializes the CES controller
@@ -180,12 +185,17 @@ func registerController(p params) error {
 		p.Lifecycle.Append(defaultController)
 	} else {
 		p.Logger.Info("CES Controller running in slim mode")
+		minIDValue := idpool.ID(identity.GetMinimalAllocationIdentity(option.Config.ClusterID))
+		maxIDValue := idpool.ID(identity.GetMaximumAllocationIdentity(option.Config.ClusterID))
+		idAllocator := basicallocator.NewBasicIDAllocator(minIDValue, maxIDValue)
+
 		slimController := &SlimController{
 			Controller:     cesController,
 			ciliumIdentity: p.CiliumIdentity,
 			pods:           p.Pods,
 			ipsecEnabled:   p.IPSecCfg.Enabled(),
 			wgEnabled:      p.WireguardCfg.Enabled(),
+			idAllocator:    idAllocator,
 		}
 		p.Lifecycle.Append(slimController)
 	}

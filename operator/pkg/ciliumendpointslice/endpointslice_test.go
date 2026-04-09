@@ -18,6 +18,8 @@ import (
 	tu "github.com/cilium/cilium/operator/pkg/ciliumendpointslice/testutils"
 	cidtest "github.com/cilium/cilium/operator/pkg/ciliumidentity/testutils"
 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
+	"github.com/cilium/cilium/pkg/identity/basicallocator"
+	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/hive"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
@@ -354,6 +356,7 @@ func TestFCFSModeSyncCESsInLocalCache(t *testing.T) {
 		reconciler:     r,
 		pods:           pods,
 		ciliumIdentity: ciliumIdentity,
+		idAllocator:    basicallocator.NewBasicIDAllocator(idpool.ID(1), idpool.ID(255)),
 	}
 	cesController.cond = *sync.NewCond(&lock.Mutex{})
 	cesController.initializeQueue()
@@ -478,6 +481,7 @@ func TestDifferentSpeedQueues(t *testing.T) {
 		reconciler:     r,
 		pods:           pods,
 		ciliumIdentity: ciliumIdentity,
+		idAllocator:    basicallocator.NewBasicIDAllocator(idpool.ID(1), idpool.ID(255)),
 	}
 	cesController.cond = *sync.NewCond(&lock.Mutex{})
 	cesController.context, cesController.contextCancel = context.WithCancel(t.Context())
@@ -602,6 +606,7 @@ func TestCESManagement(t *testing.T) {
 		reconciler:     r,
 		pods:           pods,
 		ciliumIdentity: ciliumIdentity,
+		idAllocator:    basicallocator.NewBasicIDAllocator(idpool.ID(1), idpool.ID(255)),
 	}
 	cesController.cond = *sync.NewCond(&lock.Mutex{})
 	cesController.context, cesController.contextCancel = context.WithCancel(t.Context())
@@ -715,6 +720,7 @@ func TestSyncCESsInLocalCacheDeletedCID(t *testing.T) {
 		reconciler:     r,
 		pods:           pods,
 		ciliumIdentity: ciliumIdentity,
+		idAllocator:    basicallocator.NewBasicIDAllocator(idpool.ID(1), idpool.ID(255)),
 	}
 	cesController.cond = *sync.NewCond(&lock.Mutex{})
 	cesController.initializeQueue()

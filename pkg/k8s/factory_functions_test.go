@@ -1376,7 +1376,7 @@ func Test_ConvertCoreCiliumEndpointToTypesCiliumEndpoint(t *testing.T) {
 		ServiceAccount: "test-service-account",
 	}
 
-	typesCEP := ConvertCoreCiliumEndpointToTypesCiliumEndpoint(coreCEP, "test-namespace")
+	typesCEP := ConvertCoreCiliumEndpointToTypesCiliumEndpoint(coreCEP, "test-namespace", nil)
 
 	require.Equal(t, "test-endpoint", typesCEP.Name)
 	require.Equal(t, "test-namespace", typesCEP.Namespace)
@@ -1399,7 +1399,7 @@ func Test_ConvertCoreCiliumEndpointToTypesCiliumEndpoint_NoPodUID(t *testing.T) 
 		IdentityID: 5678,
 	}
 
-	typesCEP := ConvertCoreCiliumEndpointToTypesCiliumEndpoint(coreCEP, "test-namespace")
+	typesCEP := ConvertCoreCiliumEndpointToTypesCiliumEndpoint(coreCEP, "test-namespace", nil)
 
 	require.Equal(t, "test-endpoint", typesCEP.Name)
 	require.Nil(t, typesCEP.OwnerReferences)

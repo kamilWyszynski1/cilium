@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/labels"
@@ -67,6 +68,8 @@ func NewMockIdentityAllocator(c identity.IdentityMap) *MockIdentityAllocator {
 func (f *MockIdentityAllocator) WaitForInitialGlobalIdentities(context.Context) error {
 	return nil
 }
+
+func (f *MockIdentityAllocator) InjectLabels(id idpool.ID, lbls labels.Labels) {}
 
 // GetIdentities returns the identities from the identity cache.
 func (f *MockIdentityAllocator) GetIdentities() cache.IdentitiesModel {

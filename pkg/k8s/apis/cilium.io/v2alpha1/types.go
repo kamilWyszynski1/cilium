@@ -54,12 +54,17 @@ type CoreCiliumEndpoint struct {
 	ServiceAccount string `json:"service-account,omitempty"`
 }
 
+// +k8s:deepcopy-gen=true
+type IdentityLabels struct {
+	// +kubebuilder:validation:Optional
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:resource:categories={cilium},singular="ciliumendpointslice",path="ciliumendpointslices",scope="Cluster",shortName={ces}
 // +kubebuilder:storageversion
-
 // CiliumEndpointSlice contains a group of CoreCiliumendpoints.
 type CiliumEndpointSlice struct {
 	// +deepequal-gen=false
@@ -79,6 +84,10 @@ type CiliumEndpointSlice struct {
 	//
 	// +kubebuilder:validation:Required
 	Endpoints []CoreCiliumEndpoint `json:"endpoints"`
+
+	// Labels is a mapping from numeric identity to map of labels
+	// +kubebuilder:validation:Optional
+	Labels map[string]IdentityLabels `json:"labels,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

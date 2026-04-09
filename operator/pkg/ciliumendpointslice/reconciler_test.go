@@ -360,6 +360,14 @@ func TestReconcileCreate(t *testing.T) {
 	assert.Contains(t, eps, "pod1")
 	assert.Contains(t, eps, "pod2")
 
+	for _, ep := range createdSlice.Endpoints {
+		if ep.Name == "pod1" {
+			assert.Equal(t, int64(1), ep.IdentityID)
+		} else if ep.Name == "pod2" {
+			assert.Equal(t, int64(2), ep.IdentityID)
+		}
+	}
+
 	hive.Stop(tlog, t.Context())
 }
 

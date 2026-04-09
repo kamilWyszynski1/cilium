@@ -10,6 +10,7 @@ import (
 	"github.com/cilium/stream"
 
 	"github.com/cilium/cilium/pkg/allocator"
+	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/identity"
 	identitymodel "github.com/cilium/cilium/pkg/identity/model"
 	"github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
@@ -34,6 +35,9 @@ func NewNoopIdentityAllocator(logger *slog.Logger) *NoopIdentityAllocator {
 func (n *NoopIdentityAllocator) WaitForInitialGlobalIdentities(context.Context) error {
 	return nil
 }
+
+func (n *NoopIdentityAllocator) InjectLabels(id idpool.ID, lbls labels.Labels) {}
+
 
 func (n *NoopIdentityAllocator) AllocateIdentity(ctx context.Context, lbls labels.Labels, notifyOwner bool, oldNID identity.NumericIdentity) (*identity.Identity, bool, error) {
 	n.logger.Debug(

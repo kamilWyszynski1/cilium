@@ -156,6 +156,7 @@ data:
   identity-gc-interval: {{ include "validateDuration" .Values.operator.identityGCInterval | quote }}
   cilium-endpoint-gc-interval: {{ include "validateDuration" .Values.operator.endpointGCInterval | quote }}
   nodes-gc-interval: {{ include "validateDuration" .Values.operator.nodeGCInterval | quote }}
+  enable-cid-from-ces: {{ .Values.operator.enableCIDFromCES | quote }}
 
 {{- if eq .Values.disableEndpointCRD true }}
   # Disable the usage of CiliumEndpoint CRD

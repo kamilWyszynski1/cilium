@@ -17,11 +17,14 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	op_k8s "github.com/cilium/cilium/operator/k8s"
+	"github.com/cilium/cilium/pkg/identity/key"
+	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_api_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	capi_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
@@ -440,16 +443,22 @@ func (c *SlimController) onPodUpdate(pod *slim_corev1.Pod) error {
 		return err
 	}
 
-	// pCid, err := c.reconciler.getPodIdentity(cidKey)
-	// if err != nil {
-	// 	// Pod CID couldn't be retrieved yet. We store known pod information
-	// 	// in the ces cache, so it can be associated with the CID once it is
-	// 	// created.
-	// 	c.manager.AddPodMapping(pod, node, cidKey)
-	// 	return nil // Reconciles on CID event
-	// }
+	gidLabels := Labels(cidKey.GetKey())
+	_, exists := c.manager.getCIDForLabels(gidLabels)
+	if !exists {
+		poolID, err := c.idAllocator.AllocateRandom()
+		if err != nil {
+			c.logger.Error("Failed to allocate random ID", "error", err)
+			return err
+		}
+		cidStr := CID(strconv.FormatInt(int64(poolID), 10))
+		c.logger.Debug("Allocated new ID for pod", "pod", pod.Name, "cid", cidStr)
 
-	// touchedCESs := c.manager.UpsertPodWithIdentity(pod, node, pCid)
+		// Update the mapping in manager
+		cesKeys := c.manager.updateIdentityMappingDirect(cidStr, gidLabels)
+		c.enqueueCESReconciliation(cesKeys)
+	}
+
 	touchedCESs := c.manager.AddPodMapping(pod, node, cidKey)
 	c.enqueueCESReconciliation(touchedCESs)
 	return nil
@@ -487,36 +496,40 @@ func (c *SlimController) syncCESsInLocalCache(ctx context.Context) error {
 		return err
 	}
 
-	cidStore, err := c.ciliumIdentity.Store(ctx)
-	if err != nil {
-		c.logger.WarnContext(ctx, "Error getting CID Store", logfields.Error, err)
-		return err
-	}
-
 	cnodeStore, err := c.ciliumNodes.Store(ctx)
 	if err != nil {
 		c.logger.WarnContext(ctx, "Error getting CiliumNode Store", logfields.Error, err)
 		return err
 	}
 
-	cidToLabels := make(map[CID]Labels)
-	for _, cid := range cidStore.List() {
-		cidName, gidLabels := cidToGidLabels(cid)
-		cidToLabels[cidName] = gidLabels
+	cidStore, err := c.ciliumIdentity.Store(ctx)
+	if err != nil {
+		c.logger.WarnContext(ctx, "Error getting CiliumIdentity Store", logfields.Error, err)
+		return err
 	}
 
 	for _, ces := range cesStore.List() {
 		c.manager.initializeMappingForCES(ces)
 		for _, cep := range ces.Endpoints {
 			identityid := strconv.FormatInt(cep.IdentityID, 10)
-			labels, ok := cidToLabels[CID(identityid)]
-			// If the CID is not found (e.g., deleted during operator restart), we skip restoring the state of this CEP on startup.
-			// We will get the CEP & CID add events through the resource stores and update the latest state in the local cache.
-			if !ok {
-				c.logger.DebugContext(ctx, "CID not found in Store for CEP",
+
+			// Skip restoring CEP if its identity no longer exists (e.g. deleted during operator restart)
+			_, exists, err := cidStore.GetByKey(resource.Key{Name: identityid})
+			if err != nil || !exists {
+				c.logger.DebugContext(ctx, "Skipping restoring CEP with non-existent identity",
 					logfields.CIDName, identityid,
-					logfields.CEPName, cep.Name)
+					logfields.Error, err)
 				continue
+			}
+
+			cidKey := key.GetCIDKeyFromLabels(ces.Labels[identityid].Labels, labels.LabelSourceK8s)
+			gidLabels := Labels(cidKey.GetKey())
+
+			// Mark the identity as allocated in our allocator
+			if err := c.idAllocator.Allocate(idpool.ID(cep.IdentityID)); err != nil {
+				c.logger.DebugContext(ctx, "ID already allocated or out of range",
+					logfields.CIDName, identityid,
+					logfields.Error, err)
 			}
 
 			nodeObj, err := cnodeStore.ByIndex(op_k8s.CiliumNodeIPIndex, cep.Networking.NodeIP)
@@ -527,7 +540,7 @@ func (c *SlimController) syncCESsInLocalCache(ctx context.Context) error {
 					logfields.Error, err)
 				continue
 			}
-			c.manager.initializeMappingPodToNode(NewCEPName(cep.Name, ces.Namespace), NodeName(nodeObj[0].Name), CESName(ces.Name), CID(identityid), Labels(labels), EncryptionKey(cep.Encryption.Key))
+			c.manager.initializeMappingPodToNode(NewCEPName(cep.Name, ces.Namespace), NodeName(nodeObj[0].Name), CESName(ces.Name), CID(identityid), gidLabels, EncryptionKey(cep.Encryption.Key))
 		}
 	}
 

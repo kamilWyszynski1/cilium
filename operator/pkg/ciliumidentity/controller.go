@@ -82,7 +82,8 @@ type Controller struct {
 	// multiple times before it can be processed, this will only be processed once.
 	resourceQueue workqueue.TypedRateLimitingInterface[QueuedItem]
 
-	cesEnabled bool
+	cesEnabled       bool
+	enableCIDFromCES bool
 
 	// oldNSSecurityLabels is a map between namespace, and it's security labels.
 	// It's used to track previous state of labels, to detect when labels changed.
@@ -119,6 +120,7 @@ func registerController(p params) {
 		ciliumEndpointSlice:      p.CiliumEndpointSlice,
 		oldNSSecurityLabels:      make(map[string]labels.Labels),
 		cesEnabled:               p.SharedCfg.EnableCiliumEndpointSlice,
+		enableCIDFromCES:         p.Config.EnableCIDFromCES,
 		enqueueTimeTracker:       &EnqueueTimeTracker{clock: clock.RealClock{}, enqueuedAt: make(map[string]time.Time)},
 		workqueueMetricsProvider: p.MetricsProvider,
 	}
@@ -218,7 +220,7 @@ func (c *Controller) startEventProcessing() {
 
 func (c *Controller) initReconciler(ctx context.Context) error {
 	var err error
-	c.reconciler, err = newReconciler(ctx, c.logger, c.clientset, c.namespace, c.pod, c.ciliumIdentity, c.ciliumEndpoint, c.ciliumEndpointSlice, c.cesEnabled, c)
+	c.reconciler, err = newReconciler(ctx, c.logger, c.clientset, c.namespace, c.pod, c.ciliumIdentity, c.ciliumEndpoint, c.ciliumEndpointSlice, c.cesEnabled, c.enableCIDFromCES, c)
 	if err != nil {
 		return fmt.Errorf("cid reconciler failed to init: %w", err)
 	}

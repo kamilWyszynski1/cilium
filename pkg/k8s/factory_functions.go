@@ -235,7 +235,7 @@ func getPodUIDFromOwnerRefs(refs []metav1.OwnerReference) string {
 }
 
 // ConvertCoreCiliumEndpointToTypesCiliumEndpoint converts CoreCiliumEndpoint object to types.CiliumEndpoint.
-func ConvertCoreCiliumEndpointToTypesCiliumEndpoint(ccep *cilium_v2alpha1.CoreCiliumEndpoint, ns string) *types.CiliumEndpoint {
+func ConvertCoreCiliumEndpointToTypesCiliumEndpoint(ccep *cilium_v2alpha1.CoreCiliumEndpoint, ns string, securityLabels map[string]string) *types.CiliumEndpoint {
 	var ownerRefs []slim_metav1.OwnerReference
 	if ccep.PodUID != "" {
 		ownerRefs = []slim_metav1.OwnerReference{
@@ -243,6 +243,18 @@ func ConvertCoreCiliumEndpointToTypesCiliumEndpoint(ccep *cilium_v2alpha1.CoreCi
 				Kind: "Pod",
 				UID:  k8sTypes.UID(ccep.PodUID),
 			},
+		}
+	}
+
+	var identityLabels []string
+	if len(securityLabels) > 0 {
+		identityLabels = make([]string, 0, len(securityLabels))
+		for k, v := range securityLabels {
+			if v != "" {
+				identityLabels = append(identityLabels, k+"="+v)
+			} else {
+				identityLabels = append(identityLabels, k)
+			}
 		}
 	}
 
@@ -257,7 +269,8 @@ func ConvertCoreCiliumEndpointToTypesCiliumEndpoint(ccep *cilium_v2alpha1.CoreCi
 			return &enc
 		}(),
 		Identity: &cilium_v2.EndpointIdentity{
-			ID: ccep.IdentityID,
+			ID:     ccep.IdentityID,
+			Labels: identityLabels,
 		},
 		Networking:     ccep.Networking,
 		NamedPorts:     ccep.NamedPorts,

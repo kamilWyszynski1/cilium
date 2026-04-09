@@ -920,7 +920,7 @@ forceDeviceDetection: false
 # -- CiliumEndpointSlice configuration options.
 ciliumEndpointSlice:
   # -- Enable Cilium EndpointSlice feature.
-  enabled: false
+  enabled: true
   # -- List of rate limit options to be used for the CiliumEndpointSlice controller.
   # Each object in the list must have the following fields:
   # nodes: Count of nodes at which to apply the rate limit.
@@ -939,7 +939,7 @@ ciliumEndpointSlice:
 # -- Control whether CiliumIdentities are created by the agent ("agent"), the operator ("operator") or both ("both").
 # "Both" should be used only to migrate between "agent" and "operator".
 # Operator-managed identities is a beta feature.
-identityManagementMode: "agent"
+identityManagementMode: "operator"
 envoyConfig:
   # -- Enable CiliumEnvoyConfig CRD
   # CiliumEnvoyConfig CRD can also be implicitly enabled by other options.
@@ -3250,6 +3250,8 @@ operator:
   identityGCInterval: "15m0s"
   # -- Timeout for identity heartbeats.
   identityHeartbeatTimeout: "30m0s"
+  # -- Enable CiliumIdentity generation from CiliumEndpointSlice.
+  enableCIDFromCES: false
   pprof:
     # -- Enable pprof for cilium-operator
     enabled: false

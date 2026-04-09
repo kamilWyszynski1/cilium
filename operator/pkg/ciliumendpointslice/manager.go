@@ -299,6 +299,12 @@ func (c *slimManager) UpdateIdentityMapping(id *cilium_v2.CiliumIdentity) []CESK
 	return c.mapping.insertCID(cidName, gidLabels)
 }
 
+func (c *slimManager) updateIdentityMappingDirect(cid CID, gidLabels Labels) []CESKey {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.mapping.insertCID(cid, gidLabels)
+}
+
 func (c *slimManager) RemoveIdentityMapping(id *cilium_v2.CiliumIdentity) []CESKey {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -399,6 +405,13 @@ func (c *slimManager) getCIDForCEP(cep CEPName) (CID, bool) {
 	defer c.mutex.RUnlock()
 
 	return c.mapping.getCIDForCEP(cep)
+}
+
+func (c *slimManager) getCIDForLabels(gidLabels Labels) (CID, bool) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	return c.mapping.GetCIDForLabels(gidLabels)
 }
 
 func cidToGidLabels(id *cilium_v2.CiliumIdentity) (CID, Labels) {

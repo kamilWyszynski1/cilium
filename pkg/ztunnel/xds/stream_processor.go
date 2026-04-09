@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	v3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 
@@ -112,7 +113,8 @@ func NewStreamProcessor(params *StreamProcessorParams) *StreamProcessor {
 func convertCESToEndpointMap(ces *v2alpha1.CiliumEndpointSlice) map[string]*types.CiliumEndpoint {
 	result := make(map[string]*types.CiliumEndpoint, len(ces.Endpoints))
 	for _, coreCep := range ces.Endpoints {
-		cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&coreCep, ces.Namespace)
+		idStr := strconv.FormatInt(coreCep.IdentityID, 10)
+		cep := k8s.ConvertCoreCiliumEndpointToTypesCiliumEndpoint(&coreCep, ces.Namespace, ces.Labels[idStr].Labels)
 		cepName := cep.Namespace + "/" + cep.Name
 		result[cepName] = cep
 	}

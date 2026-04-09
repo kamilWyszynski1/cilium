@@ -160,6 +160,12 @@ func (c *cache) OnUpsert(id idpool.ID, key AllocatorKey) {
 		c.nextKeyCache[key.GetKey()] = id
 	}
 
+	// Also update live cache to avoid race conditions before OnListDone
+	c.cache[id] = key
+	if key != nil {
+		c.keyCache[key.GetKey()] = id
+	}
+
 	c.allocator.idPool.Remove(id)
 
 	c.emitChange(AllocatorChange{Kind: AllocatorChangeUpsert, ID: id, Key: key})
@@ -248,6 +254,13 @@ func (c *cache) onDeleteLocked(id idpool.ID, key AllocatorKey, recreateMissingLo
 	}
 
 	delete(c.nextCache, id)
+
+	// Also delete from live cache
+	if k, ok := c.cache[id]; ok && k != nil {
+		delete(c.keyCache, k.GetKey())
+	}
+	delete(c.cache, id)
+
 	a.idPool.Insert(id)
 
 	c.emitChange(AllocatorChange{Kind: AllocatorChangeDelete, ID: id, Key: key})

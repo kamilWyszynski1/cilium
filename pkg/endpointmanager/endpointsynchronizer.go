@@ -27,6 +27,7 @@ import (
 	k8sTypes "github.com/cilium/cilium/pkg/k8s/types"
 	k8sversion "github.com/cilium/cilium/pkg/k8s/version"
 	pkgLabels "github.com/cilium/cilium/pkg/labels"
+	identityPkg "github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/node/types"
@@ -67,6 +68,12 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 	if option.Config.DisableCiliumEndpointCRD {
 		h.Stopped("ciliumendpoint CRD disabled")
 		scopedLog.Debug("Not running controller. CEP CRD synchronization is disabled")
+		return
+	}
+
+	if option.Config.EnableCiliumEndpointSlice {
+		h.Stopped("CiliumEndpointSlice enabled, skipping CEP update")
+		scopedLog.Info("Not running controller. CEP synchronization is disabled when CES is enabled")
 		return
 	}
 
@@ -144,6 +151,11 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 				}
 				if identity == nil {
 					scopedLog.Debug("Skipping CiliumEndpoint update because security identity is not yet available")
+					return nil
+				}
+
+				if option.Config.EnableCiliumEndpointSlice && identity.ID == identityPkg.ReservedIdentityInit {
+					scopedLog.Debug("Skipping CiliumEndpoint update because it has init identity and CES is enabled")
 					return nil
 				}
 
@@ -265,37 +277,37 @@ func (epSync *EndpointSynchronizer) RunK8sCiliumEndpointSync(e *endpoint.Endpoin
 					case k8serrors.IsNotFound(err):
 						// We can't create localCEP directly, it must come from the k8s
 						// server via an API call.
-						cep := &cilium_v2.CiliumEndpoint{
-							ObjectMeta: meta_v1.ObjectMeta{
-								Name: cepName,
-								OwnerReferences: []meta_v1.OwnerReference{
-									{
-										APIVersion: cepOwner.GetAPIVersion(),
-										Kind:       cepOwner.GetKind(),
-										Name:       cepOwner.GetName(),
-										UID:        cepOwner.GetUID(),
-									},
-								},
-								// Mirror the labels of parent pod in CiliumEndpoint object to enable
-								// label based selection for CiliumEndpoints.
-								Labels: cepOwner.GetLabels(),
-							},
-							Status: *mdl,
-						}
-						localCEP, err = ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Create(ctx, cep, meta_v1.CreateOptions{})
-						if err != nil {
-							// Suppress logging an error if ep backing the pod was terminated
-							// before CEP could be created and shut down the controller.
-							if errors.Is(err, context.Canceled) {
-								return nil
-							}
+						// cep := &cilium_v2.CiliumEndpoint{
+						// 	ObjectMeta: meta_v1.ObjectMeta{
+						// 		Name: cepName,
+						// 		OwnerReferences: []meta_v1.OwnerReference{
+						// 			{
+						// 				APIVersion: cepOwner.GetAPIVersion(),
+						// 				Kind:       cepOwner.GetKind(),
+						// 				Name:       cepOwner.GetName(),
+						// 				UID:        cepOwner.GetUID(),
+						// 			},
+						// 		},
+						// 		// Mirror the labels of parent pod in CiliumEndpoint object to enable
+						// 		// label based selection for CiliumEndpoints.
+						// 		Labels: cepOwner.GetLabels(),
+						// 	},
+						// 	Status: *mdl,
+						// }
+						// localCEP, err = ciliumClient.CiliumEndpoints(cepOwner.GetNamespace()).Create(ctx, cep, meta_v1.CreateOptions{})
+						// if err != nil {
+						// 	// Suppress logging an error if ep backing the pod was terminated
+						// 	// before CEP could be created and shut down the controller.
+						// 	if errors.Is(err, context.Canceled) {
+						// 		return nil
+						// 	}
 
-							scopedLog.Error("Cannot create CEP", logfields.Error, err)
-							return err
-						}
+						// 	scopedLog.Error("Cannot create CEP", logfields.Error, err)
+						// 	return err
+						// }
 
-						scopedLog.Debug("storing CEP UID after create", logfields.CEPUID, localCEP.UID)
-						e.SetCiliumEndpointUID(localCEP.UID)
+						// scopedLog.Debug("storing CEP UID after create", logfields.CEPUID, localCEP.UID)
+						// e.SetCiliumEndpointUID(localCEP.UID)
 
 						// continue the execution so we update the endpoint
 						// status immediately upon endpoint creation

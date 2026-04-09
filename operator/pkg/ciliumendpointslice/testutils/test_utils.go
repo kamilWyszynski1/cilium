@@ -36,7 +36,7 @@ var (
 	}
 )
 
-func CreateManagerEndpoint(name string, identity int64, node string) capi_v2a1.CoreCiliumEndpoint {
+func CreateManagerEndpoint(name string, identity int64, node string, labels ...map[string]string) capi_v2a1.CoreCiliumEndpoint {
 	return capi_v2a1.CoreCiliumEndpoint{
 		Name:       name,
 		IdentityID: identity,

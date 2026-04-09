@@ -152,6 +152,10 @@ type IdentityAllocator interface {
 	// previous numeric identity exists.
 	AllocateIdentity(context.Context, labels.Labels, bool, identity.NumericIdentity) (*identity.Identity, bool, error)
 
+	// InjectLabels injects a label to identity mapping into the cache. This is primarily
+	// used to populate the cache from external sources without allocating.
+	InjectLabels(idpool.ID, labels.Labels)
+
 	// AllocateLocalIdentity allocates an identity, returning error if the set of
 	// labels would not result in a locally-scoped identity.
 	//
@@ -540,6 +544,24 @@ func needsGlobalIdentity(lbls labels.Labels) bool {
 // A possible previously used numeric identity for these labels can be passed
 // in as the 'oldNID' parameter; identity.InvalidIdentity must be passed if no
 // previous numeric identity exists.
+// InjectLabels injects an identity mapping into the cache.
+func (m *CachingIdentityAllocator) InjectLabels(id idpool.ID, lbls labels.Labels) {
+	if m.IdentityAllocator != nil {
+		m.logger.Debug("InjectLabels: Injecting labels", "id", id, "labels", lbls)
+		m.IdentityAllocator.Inject(id, &key.GlobalIdentity{LabelArray: lbls.LabelArray()})
+
+		// Notify owner (SelectorCache) about the injected identity
+		added := identity.IdentityMap{
+			identity.NumericIdentity(id): lbls.LabelArray(),
+		}
+		m.owner.UpdateIdentities(added, nil)
+	}
+}
+
+// AllocateIdentity allocates an identity described by the specified labels.
+// A possible previously used numeric identity for these labels can be passed
+// in as the 'oldNID' parameter; identity.InvalidIdentity must be passed if no
+// previous numeric identity exists.
 func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls labels.Labels, notifyOwner bool, oldNID identity.NumericIdentity) (id *identity.Identity, allocated bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, m.timeout)
 	defer cancel()
@@ -566,10 +588,27 @@ func (m *CachingIdentityAllocator) AllocateIdentity(ctx context.Context, lbls la
 		return nil, false, fmt.Errorf("allocator not initialized")
 	}
 
-	idp, allocated, isNewLocally, err := m.IdentityAllocator.Allocate(ctx, &key.GlobalIdentity{LabelArray: lbls.LabelArray()})
+	allocateCtx := ctx
+	if option.Config.EnableCiliumEndpointSlice {
+		var cancel context.CancelFunc
+		allocateCtx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+	}
+
+	m.logger.Info("AllocateIdentity: Calling allocator.Allocate", "labels", lbls.String())
+	idp, allocated, isNewLocally, err := m.IdentityAllocator.Allocate(allocateCtx, &key.GlobalIdentity{LabelArray: lbls.LabelArray()})
 	if err != nil {
+		if option.Config.EnableCiliumEndpointSlice {
+			m.logger.Warn(
+				"Identity allocation failed, falling back to init identity for slim mode",
+				logfields.Error, err,
+				logfields.IdentityLabels, lbls,
+			)
+			return identity.NewIdentity(identity.ReservedIdentityInit, lbls), false, nil
+		}
 		return nil, false, err
 	}
+	m.logger.Info("AllocateIdentity: Success", "id", idp, "allocated", allocated, "isNewLocally", isNewLocally)
 	if idp > identity.MaxNumericIdentity {
 		return nil, false, fmt.Errorf("%d: numeric identity too large", idp)
 	}

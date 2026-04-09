@@ -44,7 +44,7 @@ func (t testQueueOps) enqueueReconciliation(item QueuedItem, delay time.Duration
 	t.fakeWorkQueue[item.Key().String()] = true
 }
 
-func testNewReconciler(t *testing.T, ctx context.Context, enableCES bool) (*reconciler, *testQueueOps, *k8sClient.FakeClientset, func()) {
+func testNewReconciler(t *testing.T, ctx context.Context, enableCES bool, enableCIDFromCES bool) (*reconciler, *testQueueOps, *k8sClient.FakeClientset, func()) {
 	var namespace resource.Resource[*slim_corev1.Namespace]
 	var pod resource.Resource[*slim_corev1.Pod]
 	var ciliumIdentity resource.Resource[*capi_v2.CiliumIdentity]
@@ -89,6 +89,7 @@ func testNewReconciler(t *testing.T, ctx context.Context, enableCES bool) (*reco
 		ciliumEndpoint,
 		ciliumEndpointSlice,
 		enableCES,
+		enableCIDFromCES,
 		queueOps,
 	)
 	return reconciler, queueOps, fakeClient, cleanupFunc
@@ -126,6 +127,7 @@ func TestReconcileCID(t *testing.T) {
 		expectedUpdate      *capi_v2.CiliumIdentity
 		expectedDelete      string // Name of the CID to be deleted
 		expectedQueueSize   int
+		enableCIDFromCES    bool // Enable CID from CES feature
 	}{
 		{
 			name:              "default",
@@ -180,12 +182,20 @@ func TestReconcileCID(t *testing.T) {
 			usedInPods:   false,
 			desiredState: testLbsA,
 		},
+		{
+			name:             "cid_only_in_desired_skip_creation",
+			cidKey:           cidResourceKey(cidName),
+			desiredState:     testLbsA,
+			usedInPods:       true,
+			enableCIDFromCES: true,
+			expectedCreate:   nil, // CID is NOT created
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
-			reconciler, queueOps, _, cleanupFunc := testNewReconciler(t, ctx, false)
+			reconciler, queueOps, _, cleanupFunc := testNewReconciler(t, ctx, false, tc.enableCIDFromCES)
 			defer cleanupFunc()
 
 			cs := reconciler.clientset.(*k8sClient.FakeClientset)
@@ -364,7 +374,7 @@ func TestReconcilePod(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
-			reconciler, queueOps, _, cleanupFunc := testNewReconciler(t, ctx, false)
+			reconciler, queueOps, _, cleanupFunc := testNewReconciler(t, ctx, false, false)
 			defer cleanupFunc()
 
 			for _, pod := range tc.existingPods {
@@ -455,7 +465,7 @@ func TestReconcileNS(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
-			reconciler, queueOps, _, cleanupFunc := testNewReconciler(t, ctx, false)
+			reconciler, queueOps, _, cleanupFunc := testNewReconciler(t, ctx, false, false)
 			defer cleanupFunc()
 
 			if err := reconciler.nsStore.CacheStore().Add(cidtest.NewNamespace(tc.nsName, nil)); err != nil {
@@ -506,7 +516,7 @@ func TestHandleStoreCIDMatch(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
-			reconciler, _, _, cleanupFunc := testNewReconciler(t, ctx, false)
+			reconciler, _, _, cleanupFunc := testNewReconciler(t, ctx, false, false)
 			defer cleanupFunc()
 
 			cid, err := reconciler.handleStoreCIDMatch(tc.cidList)

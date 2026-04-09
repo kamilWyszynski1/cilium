@@ -583,6 +583,7 @@ func (mgr *endpointManager) updateIDReferenceLocked(ep *endpoint.Endpoint) {
 func (mgr *endpointManager) updateReferencesLocked(ep *endpoint.Endpoint, identifiers endpointid.Identifiers) {
 	for k := range identifiers {
 		id := endpointid.NewID(k, identifiers[k])
+		mgr.logger.Info("updateReferencesLocked: Adding reference", "key", id, "endpointID", ep.ID)
 		mgr.endpointsAux[id] = ep
 	}
 }

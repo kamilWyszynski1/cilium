@@ -37,7 +37,7 @@ const (
 )
 
 func TestRegisterControllerWithOperatorManagingCIDs(t *testing.T) {
-	cidResource, cesResource, fakeClient, m, h := initHiveTest(t, true)
+	cidResource, cesResource, fakeClient, m, h := initHiveTest(t, true, true, false)
 
 	ctx := t.Context()
 	tlog := hivetest.Logger(t)
@@ -73,7 +73,7 @@ func TestRegisterControllerWithOperatorManagingCIDs(t *testing.T) {
 }
 
 func TestRegisterController(t *testing.T) {
-	cidResource, _, fakeClient, m, h := initHiveTest(t, false)
+	cidResource, _, fakeClient, m, h := initHiveTest(t, false, false, false)
 
 	ctx := t.Context()
 	tlog := hivetest.Logger(t)
@@ -103,7 +103,7 @@ func TestRegisterController(t *testing.T) {
 	}
 }
 
-func initHiveTest(t *testing.T, operatorManagingCID bool) (*resource.Resource[*capi_v2.CiliumIdentity], *resource.Resource[*capi_v2a1.CiliumEndpointSlice], *k8sClient.FakeClientset, *Metrics, *hive.Hive) {
+func initHiveTest(t *testing.T, operatorManagingCID bool, cesEnabled bool, enableCIDFromCES bool) (*resource.Resource[*capi_v2.CiliumIdentity], *resource.Resource[*capi_v2a1.CiliumEndpointSlice], *k8sClient.FakeClientset, *Metrics, *hive.Hive) {
 	var cidResource resource.Resource[*capi_v2.CiliumIdentity]
 	var cesResource resource.Resource[*capi_v2a1.CiliumEndpointSlice]
 	var fakeClient *k8sClient.FakeClientset
@@ -114,19 +114,20 @@ func initHiveTest(t *testing.T, operatorManagingCID bool) (*resource.Resource[*c
 		k8s.ResourcesCell,
 		metrics.Metric(NewMetrics),
 		cell.Provide(func() config {
+			var mode string
 			if operatorManagingCID {
-				return config{
-					IdentityManagementMode: option.IdentityManagementModeOperator,
-				}
+				mode = option.IdentityManagementModeOperator
 			} else {
-				return config{
-					IdentityManagementMode: option.IdentityManagementModeAgent,
-				}
+				mode = option.IdentityManagementModeAgent
+			}
+			return config{
+				IdentityManagementMode: mode,
+				EnableCIDFromCES:       enableCIDFromCES,
 			}
 		}),
 		cell.Provide(func() SharedConfig {
 			return SharedConfig{
-				EnableCiliumEndpointSlice: true,
+				EnableCiliumEndpointSlice: cesEnabled,
 				DisableNetworkPolicy:      false,
 			}
 		}),
@@ -218,7 +219,7 @@ func TestCreateTwoPodsWithSameLabels(t *testing.T) {
 	cid2 := cidtest.NewCIDWithNamespace("2000", pod3, ns1)
 
 	// Start test hive.
-	cidResource, _, fakeClient, _, h := initHiveTest(t, true)
+	cidResource, _, fakeClient, _, h := initHiveTest(t, true, false, false)
 	ctx, cancelCtxFunc := context.WithCancel(t.Context())
 	tlog := hivetest.Logger(t)
 	if err := h.Start(tlog, ctx); err != nil {
@@ -291,7 +292,7 @@ func TestUpdatePodLabels(t *testing.T) {
 	cid2 := cidtest.NewCIDWithNamespace("2000", pod1b, ns1)
 
 	// Start test hive.
-	cidResource, _, fakeClient, _, h := initHiveTest(t, true)
+	cidResource, _, fakeClient, _, h := initHiveTest(t, true, false, false)
 	ctx, cancelCtxFunc := context.WithCancel(t.Context())
 	tlog := hivetest.Logger(t)
 	if err := h.Start(tlog, ctx); err != nil {
@@ -360,7 +361,7 @@ func TestUpdateUsedCIDIsReverted(t *testing.T) {
 	cid2 := cidtest.NewCIDWithNamespace("2000", pod2, ns1)
 
 	// Start test hive.
-	cidResource, _, fakeClient, _, h := initHiveTest(t, true)
+	cidResource, _, fakeClient, _, h := initHiveTest(t, true, false, false)
 	ctx, cancelCtxFunc := context.WithCancel(t.Context())
 	tlog := hivetest.Logger(t)
 	if err := h.Start(tlog, ctx); err != nil {
@@ -436,7 +437,7 @@ func TestDeleteUsedCIDIsRecreated(t *testing.T) {
 	cid1 := cidtest.NewCIDWithNamespace("1000", pod1, ns1)
 
 	// Start test hive.
-	cidResource, _, fakeClient, _, h := initHiveTest(t, true)
+	cidResource, _, fakeClient, _, h := initHiveTest(t, true, false, false)
 	ctx, cancelCtxFunc := context.WithCancel(t.Context())
 	tlog := hivetest.Logger(t)
 	if err := h.Start(tlog, ctx); err != nil {
@@ -494,4 +495,47 @@ func TestDeleteUsedCIDIsRecreated(t *testing.T) {
 			t.Fatalf("expected labels %v, got %v", cid.SecurityLabels, cid1.SecurityLabels)
 		}
 	}, WaitUntilTimeout, 100*time.Millisecond)
+}
+
+func TestCIDResolutionFromCESStore(t *testing.T) {
+	cidResource, cesResource, fakeClient, _, h := initHiveTest(t, true, true, true) // operatorManagingCID=true, cesEnabled=true, enableCIDFromCES=true
+
+	ctx := t.Context()
+	tlog := hivetest.Logger(t)
+	if err := h.Start(tlog, ctx); err != nil {
+		t.Fatalf("starting hive encountered an error: %s", err)
+	}
+	defer func() {
+		if err := h.Stop(tlog, ctx); err != nil {
+			t.Fatalf("stopping hive encountered an error: %v", err)
+		}
+	}()
+
+	// Create a CES with an endpoint that has an identity and labels.
+	cidNum := 1000
+	cep1 := cestest.CreateManagerEndpoint("cep1", int64(cidNum), "node1", testLbsA)
+	ces1 := cestest.CreateStoreEndpointSlice("ces1", "ns", []capi_v2a1.CoreCiliumEndpoint{cep1})
+	
+	_, err := fakeClient.CiliumV2alpha1().CiliumEndpointSlices().Create(ctx, ces1, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	cesStore, _ := (*cesResource).Store(ctx)
+	err = testutils.WaitUntil(func() bool { return len(cesStore.List()) > 0 }, WaitUntilTimeout)
+	require.NoError(t, err, "Failed to see CES in store")
+
+	// Verify that NO CiliumIdentity object is created.
+	cidStore, _ := (*cidResource).Store(ctx)
+	time.Sleep(2 * time.Second) // Wait a bit to be sure it's not created
+	assert.Empty(t, cidStore.List(), "Expected no CIDs to be created")
+
+	// Verify that we can extract identity mappings from the CES store.
+	found := false
+	for _, ces := range cesStore.List() {
+		for _, cep := range ces.Endpoints {
+			if cep.IdentityID == int64(cidNum) {
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "Expected to find identity in CES store")
 }
