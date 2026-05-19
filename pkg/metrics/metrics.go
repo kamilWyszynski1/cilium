@@ -1053,6 +1053,8 @@ func NewLegacyMetrics() *LegacyMetrics {
 			Subsystem:  SubsystemK8sClient,
 			Name:       "api_latency_time_seconds",
 			Help:       "Duration of processed API calls labeled by path and method.",
+			// default buckets extended to 4min
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 20, 30, 40, 50, 60, 90, 120, 240},
 		}, []string{LabelPath, LabelMethod}),
 
 		KubernetesAPIRateLimiterLatency: metric.NewHistogramVec(metric.HistogramOpts{
