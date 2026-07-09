@@ -15,9 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
+	iputil "github.com/cilium/cilium/pkg/ip"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	"github.com/cilium/cilium/pkg/ipmasq"
+	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
@@ -25,6 +27,48 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/trigger"
 )
+
+func TestAzureInterfaceCIDR(t *testing.T) {
+	tests := []struct {
+		name  string
+		iface azureTypes.AzureInterface
+		want  netip.Prefix
+	}{
+		{
+			name: "new operator: Subnet.CIDR populated, flat CIDR mirrored",
+			iface: azureTypes.AzureInterface{
+				Subnet: azureTypes.AzureSubnet{CIDR: iputil.PrefixFrom(netip.MustParsePrefix("10.0.0.0/24"))},
+				CIDR:   iputil.PrefixFrom(netip.MustParsePrefix("10.0.0.0/24")), //nolint:staticcheck // exercises the dual-write path
+			},
+			want: netip.MustParsePrefix("10.0.0.0/24"),
+		},
+		{
+			name: "old operator: only flat CIDR set, fallback used",
+			iface: azureTypes.AzureInterface{
+				CIDR: iputil.PrefixFrom(netip.MustParsePrefix("10.0.0.0/24")), //nolint:staticcheck // exercises the legacy-only path
+			},
+			want: netip.MustParsePrefix("10.0.0.0/24"),
+		},
+		{
+			name: "Subnet.CIDR wins when fields disagree",
+			iface: azureTypes.AzureInterface{
+				Subnet: azureTypes.AzureSubnet{CIDR: iputil.PrefixFrom(netip.MustParsePrefix("10.0.1.0/24"))},
+				CIDR:   iputil.PrefixFrom(netip.MustParsePrefix("10.0.0.0/24")), //nolint:staticcheck // exercises preference order
+			},
+			want: netip.MustParsePrefix("10.0.1.0/24"),
+		},
+		{
+			name:  "neither field set: zero Prefix",
+			iface: azureTypes.AzureInterface{},
+			want:  netip.Prefix{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, azureInterfaceCIDR(tt.iface))
+		})
+	}
+}
 
 func TestIPNotAvailableInPoolError(t *testing.T) {
 	err := NewIPNotAvailableInPoolError(netip.MustParseAddr("1.1.1.1"))
@@ -62,12 +106,14 @@ func TestIPNotAvailableInPoolError(t *testing.T) {
 	assert.NotErrorIs(t, err, err2)
 }
 
-var testConfigurationCRD = &option.DaemonConfig{
-	EnableIPv4:              true,
-	EnableIPv6:              false,
-	EnableHealthChecking:    true,
-	EnableUnreachableRoutes: false,
-	IPAM:                    ipamOption.IPAMCRD,
+func testDaemonConfig() *option.DaemonConfig {
+	return &option.DaemonConfig{
+		EnableIPv4:              true,
+		EnableIPv6:              false,
+		EnableHealthChecking:    true,
+		EnableUnreachableRoutes: false,
+		IPAM:                    ipamOption.IPAMCRD,
+	}
 }
 
 func newFakeNodeStore(conf *option.DaemonConfig, t *testing.T) *nodeStore {
@@ -96,7 +142,7 @@ func TestMarkForReleaseNoAllocate(t *testing.T) {
 	}
 
 	fakeAddressing := fakenode.NewAddressing()
-	conf := testConfigurationCRD
+	conf := testDaemonConfig()
 	initNodeStore.Do(func() {}) // Ensure the real initNodeStore is not called
 	sharedNodeStore = newFakeNodeStore(conf, t)
 	sharedNodeStore.ownNode = cn
@@ -138,6 +184,56 @@ func TestMarkForReleaseNoAllocate(t *testing.T) {
 	require.Equal(t, ipamOption.IPAMDoNotRelease, string(cn.Status.IPAM.ReleaseIPs["1.1.1.3"]))
 }
 
+func TestNodeStoreStaticIPStatus(t *testing.T) {
+	newNode := func(tags map[string]string, assigned string) *ciliumv2.CiliumNode {
+		cn := newCiliumNode("node1", 0, 0, 0)
+		cn.Spec.IPAM.StaticIPTags = tags
+		cn.Status.IPAM.AssignedStaticIP = assigned
+		return cn
+	}
+
+	tests := []struct {
+		name                  string
+		ownNode               *ciliumv2.CiliumNode
+		wantRequestedStaticIP bool
+		wantAssignedStaticIP  string
+	}{
+		{
+			name:                  "nil node",
+			ownNode:               nil,
+			wantRequestedStaticIP: false,
+			wantAssignedStaticIP:  "",
+		},
+		{
+			name:                  "no static IP requested",
+			ownNode:               newNode(nil, ""),
+			wantRequestedStaticIP: false,
+			wantAssignedStaticIP:  "",
+		},
+		{
+			name:                  "static IP requested but not yet assigned",
+			ownNode:               newNode(map[string]string{"env": "prod"}, ""),
+			wantRequestedStaticIP: true,
+			wantAssignedStaticIP:  "",
+		},
+		{
+			name:                  "static IP requested and assigned",
+			ownNode:               newNode(map[string]string{"env": "prod"}, "1.2.3.4"),
+			wantRequestedStaticIP: true,
+			wantAssignedStaticIP:  "1.2.3.4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &nodeStore{ownNode: tt.ownNode}
+			requested, assigned := store.staticIPStatus()
+			assert.Equal(t, tt.wantRequestedStaticIP, requested)
+			assert.Equal(t, tt.wantAssignedStaticIP, assigned)
+		})
+	}
+}
+
 type ipMasqMapDummy struct{}
 
 func (m ipMasqMapDummy) Update(netip.Prefix) error { return nil }
@@ -155,16 +251,19 @@ func TestAzureIPMasq(t *testing.T) {
 			ID:      "azure-interface-1",
 			Name:    "eth0",
 			MAC:     "00:00:5e:00:53:01",
-			Gateway: "10.10.1.1",
-			CIDR:    "10.10.1.0/24",
+			Gateway: iputil.AddrFrom(netip.MustParseAddr("10.10.1.1")),
+			Subnet: azureTypes.AzureSubnet{
+				ID:   "subnet-1",
+				CIDR: iputil.PrefixFrom(netip.MustParsePrefix("10.10.1.0/24")),
+			},
 			Addresses: []azureTypes.AzureAddress{
-				{IP: "10.10.1.5", Subnet: "subnet-1", State: azureTypes.StateSucceeded},
+				{IP: iputil.AddrFrom(netip.MustParseAddr("10.10.1.5")), State: azureTypes.StateSucceeded},
 			},
 		},
 	}
 
 	fakeAddressing := fakenode.NewAddressing()
-	conf := testConfigurationCRD
+	conf := testDaemonConfig()
 	conf.IPAM = ipamOption.IPAMAzure
 	conf.EnableIPMasqAgent = true
 	ipMasqAgent := ipmasq.NewIPMasqAgent(hivetest.Logger(t), "", ipMasqMapDummy{})

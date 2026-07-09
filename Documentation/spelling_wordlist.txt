@@ -94,6 +94,7 @@ Multihop
 Multiprotocol
 Mythbusters
 NDP
+NativeRoutingCIDR
 Neovim
 Netlify
 Netronome
@@ -107,6 +108,7 @@ Pepelnjak
 Perfdash
 Pfaff
 PodCIDR
+PodCIDRList
 Polytechnique
 Portworx
 QCon
@@ -249,6 +251,7 @@ cli
 clientsets
 cls
 clusterIP
+clusterPoolIPv
 clustermesh
 clustermeshcertgen
 clustermeshes
@@ -374,6 +377,7 @@ fieldAggregate
 filesystem
 filesystems
 firewalling
+formatters
 fortio
 fqdn
 fromCIDR
@@ -671,9 +675,9 @@ powershell
 pprof
 pre
 preconfigured
+preferIpv
 prefilter
 preflight
-preferIpv
 preload
 preloaded
 preloading
@@ -751,6 +755,7 @@ seccomp
 secretName
 secretsBackend
 secretsNamespace
+selectorless
 selftest
 selftests
 serverinfo

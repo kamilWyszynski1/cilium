@@ -42,16 +42,35 @@ func (e *ErrNotInRange) Error() string {
 type CIDRRangeOption func(*cidrRangeOptions)
 
 type cidrRangeOptions struct {
-	allowFirstLastIPs bool
+	allowFirstIP bool
+	allowLastIP  bool
+}
+
+// WithAllowFirstIP configures the Range to include the first IP of the CIDR
+// (normally reserved as the network address). This is useful for delegated
+// prefixes where the entire range is exclusively assigned.
+func WithAllowFirstIP() CIDRRangeOption {
+	return func(o *cidrRangeOptions) {
+		o.allowFirstIP = true
+	}
+}
+
+// WithAllowLastIP configures the Range to include the last IP of the CIDR
+// (normally reserved as the broadcast address). This is useful for delegated
+// prefixes where the entire range is exclusively assigned.
+func WithAllowLastIP() CIDRRangeOption {
+	return func(o *cidrRangeOptions) {
+		o.allowLastIP = true
+	}
 }
 
 // WithAllowFirstLastIPs configures the Range to include the first and last IPs
-// of the CIDR (normally reserved as network and broadcast addresses). This is
-// useful for delegated prefixes (e.g. AWS /28 prefix delegation) where the
-// entire range is exclusively assigned and there is no shared network segment.
+// of the CIDR. This is kept as a convenience wrapper for callers that need both
+// addresses.
 func WithAllowFirstLastIPs() CIDRRangeOption {
 	return func(o *cidrRangeOptions) {
-		o.allowFirstLastIPs = true
+		o.allowFirstIP = true
+		o.allowLastIP = true
 	}
 }
 
@@ -84,7 +103,8 @@ type Range struct {
 // NewCIDRRange creates a Range over a netip.Prefix, calling allocator.NewAllocationMap
 // to construct the backing store. By default, the first (network) and last
 // (broadcast) addresses are excluded for CIDRs with more than 2 addresses.
-// Pass functional options (e.g. WithAllowFirstLastIPs) to alter this behavior.
+// Pass functional options (e.g. WithAllowFirstIP, WithAllowLastIP) to alter
+// this behavior.
 func NewCIDRRange(prefix netip.Prefix, opts ...CIDRRangeOption) *Range {
 	var o cidrRangeOptions
 	for _, opt := range opts {
@@ -95,12 +115,15 @@ func NewCIDRRange(prefix netip.Prefix, opts ...CIDRRangeOption) *Range {
 	base := prefix.Addr()
 	size := RangeSize(prefix)
 
-	// for any CIDR other than /32 or /128:
-	if size > 2 && !o.allowFirstLastIPs {
-		// don't use the network broadcast
-		size = max(0, size-2)
-		// don't use the network base
-		base = base.Next()
+	// for any CIDR other than /31, /32, /127 or /128:
+	if size > 2 {
+		if !o.allowFirstIP {
+			size--
+			base = base.Next()
+		}
+		if !o.allowLastIP {
+			size--
+		}
 	}
 
 	return &Range{
@@ -214,8 +237,8 @@ func (r *Range) contains(ip netip.Addr) (bool, int) {
 		return false, 0
 	}
 
-	offset := addrOffset(r.base, ip)
-	if offset < 0 || offset >= r.max {
+	offset, ok := addrOffset(r.base, ip)
+	if !ok || offset >= r.max {
 		return false, 0
 	}
 	return true, offset
@@ -242,15 +265,45 @@ func addOffset(base netip.Addr, offset int) netip.Addr {
 }
 
 // addrOffset returns the integer offset of addr from base (addr - base).
-func addrOffset(base, addr netip.Addr) int {
+// The bool is false if addr is before base or if the offset does not fit in an int.
+func addrOffset(base, addr netip.Addr) (int, bool) {
 	if base.Is4() {
 		b := base.As4()
 		a := addr.As4()
-		return int(binary.BigEndian.Uint32(a[:]) - binary.BigEndian.Uint32(b[:]))
+		baseValue := binary.BigEndian.Uint32(b[:])
+		addrValue := binary.BigEndian.Uint32(a[:])
+		if addrValue < baseValue {
+			return 0, false
+		}
+		offset := addrValue - baseValue
+		if uint64(offset) > uint64(^uint(0)>>1) {
+			return 0, false
+		}
+		return int(offset), true
 	}
 	b := base.As16()
 	a := addr.As16()
-	return int(binary.BigEndian.Uint64(a[8:]) - binary.BigEndian.Uint64(b[8:]))
+	baseHi := binary.BigEndian.Uint64(b[:8])
+	baseLo := binary.BigEndian.Uint64(b[8:])
+	addrHi := binary.BigEndian.Uint64(a[:8])
+	addrLo := binary.BigEndian.Uint64(a[8:])
+
+	if addrHi < baseHi || (addrHi == baseHi && addrLo < baseLo) {
+		return 0, false
+	}
+
+	hi := addrHi - baseHi
+	lo := addrLo - baseLo
+	if addrLo < baseLo {
+		hi--
+	}
+	if hi != 0 {
+		return 0, false
+	}
+	if lo > uint64(^uint(0)>>1) {
+		return 0, false
+	}
+	return int(lo), true
 }
 
 // RangeSize returns the size of a range in valid addresses.

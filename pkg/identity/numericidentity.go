@@ -14,8 +14,10 @@ import (
 	"unsafe"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	api "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -98,43 +100,51 @@ var (
 
 const (
 	// IdentityUnknown represents an unknown identity
-	IdentityUnknown NumericIdentity = iota
+	IdentityUnknown = NumericIdentity(datapath.IdentityUnknownID)
 
 	// ReservedIdentityHost represents the local host
-	ReservedIdentityHost
+	ReservedIdentityHost = NumericIdentity(datapath.IdentityHostID)
 
 	// ReservedIdentityWorld represents any endpoint outside of the cluster
-	ReservedIdentityWorld
+	ReservedIdentityWorld = NumericIdentity(datapath.IdentityWorldID)
 
 	// ReservedIdentityUnmanaged represents unmanaged endpoints.
-	ReservedIdentityUnmanaged
+	ReservedIdentityUnmanaged = NumericIdentity(datapath.IdentityUnmanagedID)
 
 	// ReservedIdentityHealth represents the local cilium-health endpoint
-	ReservedIdentityHealth
+	ReservedIdentityHealth = NumericIdentity(datapath.IdentityHealthID)
 
 	// ReservedIdentityInit is the identity given to endpoints that have not
 	// received any labels yet.
-	ReservedIdentityInit
+	ReservedIdentityInit = NumericIdentity(datapath.IdentityInitID)
 
 	// ReservedIdentityRemoteNode is the identity given to all nodes in
 	// local and remote clusters except for the local node.
-	ReservedIdentityRemoteNode
+	ReservedIdentityRemoteNode = NumericIdentity(datapath.IdentityRemoteNodeID)
 
 	// ReservedIdentityKubeAPIServer is the identity given to remote node(s) which
 	// have backend(s) serving the kube-apiserver running.
-	ReservedIdentityKubeAPIServer
+	ReservedIdentityKubeAPIServer = NumericIdentity(datapath.IdentityKubeAPIServerNodeID)
 
 	// ReservedIdentityIngress is the identity given to the IP used as the source
 	// address for connections from Ingress proxies.
-	ReservedIdentityIngress
+	ReservedIdentityIngress = NumericIdentity(datapath.IdentityIngressID)
 
 	// ReservedIdentityWorldIPv4 represents any endpoint outside of the cluster
 	// for IPv4 address only.
-	ReservedIdentityWorldIPv4
+	ReservedIdentityWorldIPv4 = NumericIdentity(datapath.IdentityWorldIPv4ID)
 
 	// ReservedIdentityWorldIPv6 represents any endpoint outside of the cluster
 	// for IPv6 address only.
-	ReservedIdentityWorldIPv6
+	ReservedIdentityWorldIPv6 = NumericIdentity(datapath.IdentityWorldIPv6ID)
+
+	// ReservedIdentityCluster is used for policy map aggregation for all in-cluster traffic.
+	// It is not applied to any endpoints or packets directly.
+	ReservedIdentityCluster = NumericIdentity(datapath.IdentityPolicyClusterID)
+
+	// ReservedIdentityClusterMesh is used for policy map aggregation for all cluster-mesh traffic.
+	// It is not applied to any endpoints or packets directly.
+	ReservedIdentityClusterMesh = NumericIdentity(datapath.IdentityPolicyClusterMeshID)
 )
 
 // Special identities for well-known cluster components
@@ -184,13 +194,21 @@ type wellKnownIdentity struct {
 	labelArray labels.LabelArray
 }
 
+// wellKnownMU protects the wellKnownIdentities map. InitWellKnownIdentities can
+// run concurrently with readers (e.g. multiple agent instances in tests), so the
+// map needs synchronization of its own.
+var wellKnownMU lock.RWMutex
+
 func (w wellKnownIdentities) add(i NumericIdentity, lbls []string) {
 	labelMap := labels.NewLabelsFromModel(lbls)
 	identity := NewIdentity(i, labelMap)
+
+	wellKnownMU.Lock()
 	w[i] = wellKnownIdentity{
 		identity:   NewIdentity(i, labelMap),
 		labelArray: labelMap.LabelArray(),
 	}
+	wellKnownMU.Unlock()
 
 	cacheMU.Lock()
 	reservedIdentityCache[i] = identity
@@ -198,6 +216,8 @@ func (w wellKnownIdentities) add(i NumericIdentity, lbls []string) {
 }
 
 func (w wellKnownIdentities) LookupByLabels(lbls labels.Labels) *Identity {
+	wellKnownMU.RLock()
+	defer wellKnownMU.RUnlock()
 	for _, i := range w {
 		if lbls.Equals(i.identity.Labels) {
 			return i.identity
@@ -208,12 +228,16 @@ func (w wellKnownIdentities) LookupByLabels(lbls labels.Labels) *Identity {
 }
 
 func (w wellKnownIdentities) ForEach(yield func(*Identity)) {
+	wellKnownMU.RLock()
+	defer wellKnownMU.RUnlock()
 	for _, id := range w {
 		yield(id.identity)
 	}
 }
 
 func (w wellKnownIdentities) lookupByNumericIdentity(identity NumericIdentity) *Identity {
+	wellKnownMU.RLock()
+	defer wellKnownMU.RUnlock()
 	wki, ok := w[identity]
 	if !ok {
 		return nil
@@ -221,17 +245,34 @@ func (w wellKnownIdentities) lookupByNumericIdentity(identity NumericIdentity) *
 	return wki.identity
 }
 
-type Configuration interface {
-	CiliumNamespaceName() string
-}
-
 func k8sLabel(key string, value string) string {
 	return "k8s:" + key + "=" + value
 }
 
-// InitWellKnownIdentities establishes all well-known identities. Returns the
-// number of well-known identities initialized.
-func InitWellKnownIdentities(c Configuration, cinfo cmtypes.ClusterInfo) int {
+// InitStaticIdentities establishes all well-known and static identities. Returns the
+// number of well-known (but not reserved) identities initialized.
+func InitStaticIdentities(ciliumNS string, cinfo cmtypes.ClusterInfo, enableWellKnown bool) int {
+
+	// Add the cluster identity to reserved identities.
+	// This cannot be done statically, as we need to know the cluster name.
+	AddReservedIdentityWithLabels(ReservedIdentityCluster,
+		labels.FromSlice([]labels.Label{
+			labels.NewLabel(labels.IDNameCluster, "", labels.LabelSourceReserved),
+			labels.NewLabel(api.PolicyLabelCluster, cinfo.Name, labels.LabelSourceK8s),
+		}))
+
+	// The ClusterMesh identity has the cluster label name, but with a value of "".
+	// This is selected by the Has selector.
+	AddReservedIdentityWithLabels(ReservedIdentityClusterMesh,
+		labels.FromSlice([]labels.Label{
+			labels.NewLabel(labels.IDNameClusterMesh, "", labels.LabelSourceReserved),
+			labels.NewLabel(api.PolicyLabelCluster, "", labels.LabelSourceK8s),
+		}))
+
+	if !enableWellKnown {
+		return 0
+	}
+
 	// kube-dns labels
 	//   k8s:io.cilium.k8s.policy.serviceaccount=kube-dns
 	//   k8s:io.kubernetes.pod.namespace=kube-system
@@ -309,13 +350,13 @@ func InitWellKnownIdentities(c Configuration, cinfo cmtypes.ClusterInfo) int {
 		"k8s:io.cilium/app=operator",
 		"k8s:app.kubernetes.io/part-of=cilium",
 		"k8s:app.kubernetes.io/name=cilium-operator",
-		k8sLabel(api.PodNamespaceLabel, c.CiliumNamespaceName()),
+		k8sLabel(api.PodNamespaceLabel, ciliumNS),
 		k8sLabel(api.PolicyLabelServiceAccount, "cilium-operator"),
 		k8sLabel(api.PolicyLabelCluster, cinfo.Name),
 	}
 	WellKnown.add(ReservedCiliumOperator, ciliumOperatorLabels)
 	WellKnown.add(ReservedCiliumOperator2, append(ciliumOperatorLabels,
-		k8sLabel(api.PodNamespaceMetaNameLabel, c.CiliumNamespaceName())))
+		k8sLabel(api.PodNamespaceMetaNameLabel, ciliumNS)))
 
 	return len(WellKnown)
 }

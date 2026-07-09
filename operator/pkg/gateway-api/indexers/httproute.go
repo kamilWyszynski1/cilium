@@ -35,6 +35,25 @@ func IndexHTTPRouteByGateway(rawObj client.Object) []string {
 	return gateways
 }
 
+// IndexHTTPRouteByListenerSet indexes HTTPRoutes by all ListenerSet parents
+// referenced in the object, returning ListenerSet full names (`namespace/name`).
+func IndexHTTPRouteByListenerSet(rawObj client.Object) []string {
+	hr := rawObj.(*gatewayv1.HTTPRoute)
+	var listenerSets []string
+	for _, parent := range hr.Spec.ParentRefs {
+		if !helpers.IsListenerSet(parent) {
+			continue
+		}
+		listenerSets = append(listenerSets,
+			types.NamespacedName{
+				Namespace: helpers.NamespaceDerefOr(parent.Namespace, hr.Namespace),
+				Name:      string(parent.Name),
+			}.String(),
+		)
+	}
+	return listenerSets
+}
+
 // IndexHTTPRouteByGammaService is a client.IndexerFunc that takes a single HTTPRoute and returns all
 // referenced Service object full names (`namespace/name`) to add to the relevant index.
 func IndexHTTPRouteByGammaService(rawObj client.Object) []string {
@@ -81,6 +100,27 @@ func GenerateIndexerHTTPRouteByBackendService(c client.Client, logger *slog.Logg
 				backendServices = append(backendServices,
 					types.NamespacedName{
 						Namespace: helpers.NamespaceDerefOr(backend.Namespace, route.Namespace),
+						Name:      backendServiceName,
+					}.String(),
+				)
+			}
+			for _, f := range rule.Filters {
+				if f.Type != gatewayv1.HTTPRouteFilterExternalAuth || f.ExternalAuth == nil {
+					continue
+				}
+				ea := f.ExternalAuth
+				namespace := helpers.NamespaceDerefOr(ea.BackendRef.Namespace, route.Namespace)
+				backendServiceName, err := helpers.GetBackendServiceName(c, namespace, ea.BackendRef)
+				if err != nil {
+					logger.Error("Failed to get ext_auth backend service name",
+						logfields.LogSubsys, logfields.HTTPRoute,
+						logfields.HTTPRoute, client.ObjectKeyFromObject(rawObj),
+						logfields.Error, err)
+					continue
+				}
+				backendServices = append(backendServices,
+					types.NamespacedName{
+						Namespace: namespace,
 						Name:      backendServiceName,
 					}.String(),
 				)

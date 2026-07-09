@@ -34,13 +34,15 @@ type kprConfig struct {
 	enableBPFMasquerade        bool
 	enableIPv4Masquerade       bool
 	enableSocketLBTracing      bool
+	enableIPIPTermination      bool
 
 	expectedErrorRegex string
 
-	routingMode    string
-	tunnelProtocol tunnel.EncapProtocol
-	nodePortMode   string
-	dispatchMode   string
+	routingMode      string
+	tunnelProtocol   tunnel.EncapProtocol
+	nodePortMode     string
+	dispatchMode     string
+	lbModeAnnotation bool
 
 	lbConfig    loadbalancer.Config
 	kprConfig   kpr.KPRConfig
@@ -67,11 +69,14 @@ func (cfg *kprConfig) set() (err error) {
 	option.Config.EnableIPv4Masquerade = cfg.enableIPv4Masquerade
 	option.Config.UnsafeDaemonConfigOption.EnableSocketLBTracing = true
 	option.Config.RoutingMode = cfg.routingMode
+	option.Config.EnableIPIPTermination = false
+	option.Config.UnsafeDaemonConfigOption.EnableIPIPDevices = false
 
 	if cfg.nodePortMode == loadbalancer.LBModeDSR || cfg.nodePortMode == loadbalancer.LBModeHybrid {
 		cfg.lbConfig.LBMode = cfg.nodePortMode
 	}
 
+	cfg.lbConfig.LBModeAnnotation = cfg.lbModeAnnotation
 	cfg.lbConfig.DSRDispatch = cfg.dispatchMode
 
 	return nil
@@ -115,6 +120,7 @@ func (cfg *kprConfig) verify(t *testing.T, lbConfig loadbalancer.Config, kprCfg 
 	require.Equal(t, cfg.enableBPFMasquerade, option.Config.EnableBPFMasquerade)
 	require.Equal(t, cfg.enableIPv4Masquerade, option.Config.EnableIPv4Masquerade)
 	require.Equal(t, cfg.enableSocketLBTracing, option.Config.UnsafeDaemonConfigOption.EnableSocketLBTracing)
+	require.Equal(t, cfg.enableIPIPTermination, option.Config.EnableIPIPTermination)
 }
 
 func TestInitKubeProxyReplacementOptions(t *testing.T) {
@@ -252,6 +258,40 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 				enableSocketLBTracing:   true,
 			},
 		},
+		// Node port DSR mode + IPIP dispatch + native routing: IPIP termination
+		// is enabled implicitly, without a separate --enable-ipip-termination.
+		{
+			"node-port-dsr-mode+ipip-dispatch+native-routing",
+			func(cfg *kprConfig) {
+				cfg.kubeProxyReplacement = true
+				cfg.routingMode = option.RoutingModeNative
+				cfg.nodePortMode = loadbalancer.LBModeDSR
+				cfg.dispatchMode = loadbalancer.DSRDispatchIPIP
+			},
+			kprConfig{
+				enableSocketLB:          true,
+				enableHostLegacyRouting: false,
+				enableSocketLBTracing:   true,
+				enableIPIPTermination:   true,
+			},
+		},
+		// Node port hybrid mode + IPIP dispatch + native routing: hybrid also
+		// uses DSR, so IPIP termination is enabled implicitly as well.
+		{
+			"node-port-hybrid-mode+ipip-dispatch+native-routing",
+			func(cfg *kprConfig) {
+				cfg.kubeProxyReplacement = true
+				cfg.routingMode = option.RoutingModeNative
+				cfg.nodePortMode = loadbalancer.LBModeHybrid
+				cfg.dispatchMode = loadbalancer.DSRDispatchIPIP
+			},
+			kprConfig{
+				enableSocketLB:          true,
+				enableHostLegacyRouting: false,
+				enableSocketLBTracing:   true,
+				enableIPIPTermination:   true,
+			},
+		},
 		// Node port DSR mode + Geneve dispatch + geneve routing
 		{
 			"node-port-dsr-mode+geneve-dispatch+geneve-routing",
@@ -330,6 +370,43 @@ func TestInitKubeProxyReplacementOptions(t *testing.T) {
 			},
 			kprConfig{
 				expectedErrorRegex:      "Node Port .+ mode cannot be used with .+ tunneling.",
+				enableSocketLB:          true,
+				enableHostLegacyRouting: false,
+				enableSocketLBTracing:   true,
+			},
+		},
+
+		// LB mode annotation + IPIP dispatch + vxlan routing: ok, as IPIP
+		// dispatch is not mutually exclusive with VXLAN.
+		{
+			"lb-mode-annotation+ipip-dispatch+vxlan-routing",
+			func(cfg *kprConfig) {
+				cfg.kubeProxyReplacement = true
+				cfg.routingMode = option.RoutingModeTunnel
+				cfg.tunnelProtocol = tunnel.VXLAN
+				cfg.lbModeAnnotation = true
+				cfg.dispatchMode = loadbalancer.DSRDispatchIPIP
+			},
+			kprConfig{
+				enableSocketLB:          true,
+				enableHostLegacyRouting: false,
+				enableSocketLBTracing:   true,
+				enableIPIPTermination:   true,
+			},
+		},
+		// LB mode annotation + Geneve dispatch + vxlan routing: error, as only
+		// IPIP dispatch is supported with VXLAN tunneling.
+		{
+			"lb-mode-annotation+geneve-dispatch+vxlan-routing",
+			func(cfg *kprConfig) {
+				cfg.kubeProxyReplacement = true
+				cfg.routingMode = option.RoutingModeTunnel
+				cfg.tunnelProtocol = tunnel.VXLAN
+				cfg.lbModeAnnotation = true
+				cfg.dispatchMode = loadbalancer.DSRDispatchGeneve
+			},
+			kprConfig{
+				expectedErrorRegex:      "Only --.+ is supported with .+ tunneling when --.+ is set",
 				enableSocketLB:          true,
 				enableHostLegacyRouting: false,
 				enableSocketLBTracing:   true,

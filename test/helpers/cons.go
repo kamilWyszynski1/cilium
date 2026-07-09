@@ -25,9 +25,6 @@ var (
 	// than ShortCommandTimeout, but less time than HelperTimeout to execute.
 	MidCommandTimeout = 30 * time.Second
 
-	// CiliumStartTimeout is a predefined timeout value for Cilium startup.
-	CiliumStartTimeout = 100 * time.Second
-
 	// CheckLogs newtes a new buffer where all the warnings and checks that
 	// happens during the test are saved. This buffer will be printed in the
 	// test output inside <checks> labels.
@@ -43,18 +40,11 @@ const (
 	K8sManifestBase = "k8s/manifests"
 
 	// VM / Test suite constants.
-	K8s     = "k8s"
-	K8s1    = "k8s1"
-	K8s2    = "k8s2"
-	K8s3    = "k8s3"
-	Runtime = "runtime"
+	K8s  = "k8s"
+	K8s1 = "k8s1"
+	K8s2 = "k8s2"
 
-	Enabled  = "enabled"
-	Disabled = "disabled"
-	Total    = "total"
-	Public   = "public"
-	Private  = "private"
-	Name     = "Name"
+	Enabled = "enabled"
 
 	// CiliumAgentLabel is the label used for Cilium
 	CiliumAgentLabel = "k8s-app=cilium"
@@ -70,33 +60,12 @@ const (
 	// for Cilium.
 	PolicyEnforcementDefault = "default"
 
-	// PolicyEnforcementAlways represents the PolicyEnforcement mode
-	// for Cilium in which traffic is denied by default even when no policy
-	// is imported.
-	PolicyEnforcementAlways = "always"
-
-	// CiliumDockerNetwork is the name of the Docker network which Cilium manages.
-	CiliumDockerNetwork = "cilium-net"
-
-	// HostDockerNetwork is the name of the host network driver.
-	HostDockerNetwork = "host"
-
-	// WorldDockerNetwork is the name of the docker network that is *not*
-	// managed by Cilium, intended to be treated as "world" for identity
-	// purposes (for policy tests).
-	WorldDockerNetwork = "world"
-
 	// Names of commonly used containers in tests.
-	Httpd1      = "httpd1"
-	Httpd2      = "httpd2"
-	Httpd3      = "httpd3"
-	App1        = "app1"
-	App2        = "app2"
-	App3        = "app3"
-	Client      = "client"
-	Server      = "server"
-	Host        = "host"
-	WorldHttpd1 = "WorldHttpd1"
+	App1   = "app1"
+	App2   = "app2"
+	App3   = "app3"
+	Client = "client"
+	Host   = "host"
 	// Container lifecycle actions.
 	Create = "create"
 	Delete = "delete"
@@ -108,13 +77,6 @@ const (
 	// LogPerm is the permission for files that are created by this framework
 	// that contain logs, outputs of Cilium CLI commands, etc.
 	LogPerm = os.FileMode(0666)
-
-	// Configuration options for endpoints. Copied from endpoint/endpoint.go
-	// TODO: these should be converted into types for use in configuration
-	// functions instead of using basic strings.
-
-	OptionConntrackAccounting = "ConntrackAccounting"
-	OptionEnabled             = "Enabled"
 
 	PingCount   = 5
 	PingTimeout = 5
@@ -135,18 +97,9 @@ const (
 	CiliumNamespaceDefault = KubeSystemNamespace
 
 	TestResultsPath = "test_results/"
-	RunDir          = "/var/run/cilium"
-	LibDir          = "/var/lib/cilium"
-
-	DaemonName             = "cilium"
-	CiliumBugtool          = "cilium-bugtool"
-	CiliumBugtoolArgs      = "--exclude-object-files"
-	CiliumDockerDaemonName = "cilium-docker"
 
 	KubectlDelete = ResourceLifeCycleAction("delete")
 	KubectlApply  = ResourceLifeCycleAction("apply")
-
-	MonitorLogFileName = "monitor.log"
 
 	// CiliumTestLog is the filename where the cilium logs that happens during
 	// the test are saved.
@@ -159,17 +112,6 @@ const (
 	// CiliumOperatorTestLog is the filename where the cilium operator logs that happens during
 	// the test are saved.
 	CiliumOperatorTestLog = "cilium-operator-test.log"
-
-	// FakeIPv4WorldAddress is an IP which is used in some datapath tests
-	// for simulating external IPv4 connectivity.
-	FakeIPv4WorldAddress = "192.168.254.254"
-
-	// FakeIPv6WorldAddress is an IP which is used in some datapath tests
-	// for simulating external IPv6 connectivity.
-	FakeIPv6WorldAddress = "fdff::ff"
-
-	// DockerBridgeIP is the IP on the docker0 bridge
-	DockerBridgeIP = "172.17.0.1"
 
 	// Logs messages that should not be in the cilium logs...
 	panicMessage        = "panic:"
@@ -223,12 +165,9 @@ var (
 	LogGathererNamespace = CiliumNamespace
 )
 
-// Re-definitions of stable constants in the API. The re-definition is on
-// purpose to validate these values in the API. They may never change
+// Re-definition of a stable constant in the API. The re-definition is on
+// purpose to validate this value in the API. It may never change.
 const (
-	// ReservedIdentityHealth is equivalent to pkg/identity.ReservedIdentityHealth
-	ReservedIdentityHealth = 4
-
 	// ReservedIdentityHost is equivalent to pkg/identity.ReservedIdentityHost
 	ReservedIdentityHost = 1
 )
@@ -261,21 +200,7 @@ var badLogMessages = map[string][]string{
 		cantUpdateCRDIdentity, cantDeleteFromPolicyMap, failedToListCRDs, mutationDetector},
 }
 
-var ciliumCLICommands = map[string]string{
-	"cilium-dbg endpoint list -o json":          "endpoint_list.txt",
-	"cilium-dbg service list -o json":           "service_list.txt",
-	"cilium-dbg config":                         "config.txt",
-	"sudo cilium-dbg bpf lb list":               "bpf_lb_list.txt",
-	"sudo cilium-dbg bpf ct list":               "bpf_ct_list.txt",
-	"cilium-dbg policy get":                     "policy_get.txt",
-	"cilium-dbg status --all-controllers":       "status.txt",
-	"cilium-dbg kvstore get cilium --recursive": "kvstore_get.txt",
-
-	"hubble observe --since 4h -o jsonpb": "hubble_observe.json",
-}
-
-// ciliumKubCLICommands these commands are the same as `ciliumCLICommands` but
-// it'll run inside a container and it does not have sudo support
+// ciliumKubCLICommands are run inside a container and do not have sudo support.
 var ciliumKubCLICommands = map[string]string{
 	"cilium-dbg endpoint list -o json":    "endpoint_list.txt",
 	"cilium-dbg service list -o json":     "service_list.txt",

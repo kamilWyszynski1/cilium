@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 
@@ -185,6 +185,10 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 			return invalidDataError(ep, fmt.Errorf("not allowed to add reserved labels: %s", lbls))
 		}
 
+		if apiLabels.IsGenerated() {
+			return invalidDataError(ep, fmt.Errorf("not allowed to add generated labels: %s", apiLabels))
+		}
+
 		apiLabels, _ = labelsfilter.Filter(apiLabels)
 		if len(apiLabels) == 0 {
 			return invalidDataError(ep, fmt.Errorf("no valid labels provided"))
@@ -231,7 +235,7 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 			ep.Logger("api").Warn("Unable to fetch kubernetes labels", logfields.Error, err)
 		} else {
 			ep.SetPod(pod)
-			ep.SetK8sMetadata(k8sMetadata.ContainerPorts)
+			ep.SetK8sMetadata(k8sMetadata.NamedPorts)
 			identityLbls.MergeLabels(k8sMetadata.IdentityLabels)
 			infoLabels.MergeLabels(k8sMetadata.InfoLabels)
 			if _, ok := pod.Annotations[bandwidth.IngressBandwidth]; ok && !m.bandwidthManager.Enabled() {
@@ -248,7 +252,7 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 					logfields.Annotations, pod.Annotations,
 				)
 			}
-			if hwAddr, ok := pod.Annotations[annotation.PodAnnotationMAC]; !ep.GetDisableLegacyIdentifiers() && ok {
+			if hwAddr, ok := pod.Annotations[annotation.PodAnnotationMAC]; !ep.IsSecondaryInterface() && ok {
 				mac, err := mac.ParseMAC(hwAddr)
 				if err != nil {
 					m.logger.Error("Unable to parse MAC address",
@@ -338,7 +342,7 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 	// timers of all attached IPs
 	if addressing := epTemplate.Addressing; addressing != nil {
 		if uuid := addressing.IPv4ExpirationUUID; uuid != "" {
-			if ip := net.ParseIP(addressing.IPv4); ip != nil {
+			if ip, err := netip.ParseAddr(addressing.IPv4); err == nil {
 				pool := ipam.PoolOrDefault(addressing.IPv4PoolName)
 				if err := m.ipam.StopExpirationTimer(ip, pool, uuid); err != nil {
 					return m.errorDuringCreation(ep, err)
@@ -346,7 +350,7 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 			}
 		}
 		if uuid := addressing.IPv6ExpirationUUID; uuid != "" {
-			if ip := net.ParseIP(addressing.IPv6); ip != nil {
+			if ip, err := netip.ParseAddr(addressing.IPv6); err == nil {
 				pool := ipam.PoolOrDefault(addressing.IPv6PoolName)
 				if err := m.ipam.StopExpirationTimer(ip, pool, uuid); err != nil {
 					return m.errorDuringCreation(ep, err)
@@ -362,13 +366,14 @@ func (m *endpointAPIManager) CreateEndpoint(ctx context.Context, epTemplate *mod
 // testing purposes.
 var handleOutdatedPodInformerRetryPeriod = 100 * time.Millisecond
 
+// handleOutdatedPodInformer is only used when creating new Endpoints, never for restored endpoints!
 func (m *endpointAPIManager) handleOutdatedPodInformer(ctx context.Context, ep *endpoint.Endpoint) (pod *slim_corev1.Pod, k8sMetadata *endpoint.K8sMetadata, err error) {
 	var once sync.Once
 
 	// Average attempt is every 100ms.
 	err = resiliency.Retry(ctx, handleOutdatedPodInformerRetryPeriod, 20, func(_ context.Context, _ int) (bool, error) {
 		var err2 error
-		pod, k8sMetadata, err2 = m.endpointMetadata.FetchK8sMetadataForEndpoint(ep.K8sNamespace, ep.K8sPodName, ep.K8sUID)
+		pod, k8sMetadata, err2 = m.endpointMetadata.FetchK8sMetadataForEndpoint(ep.K8sNamespace, ep.K8sPodName, ep.K8sUID, true)
 		if ep.K8sUID == "" {
 			// If the CNI did not set the UID, then don't retry and just exit
 			// out of the loop to proceed as normal.

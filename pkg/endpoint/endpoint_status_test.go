@@ -21,11 +21,10 @@ func TestGetCiliumEndpointStatus(t *testing.T) {
 			IPv4: "192.168.1.100",
 			IPv6: "f00d::a10:0:0:abcd",
 		},
-		ContainerID:   "ContainerID",
-		ContainerName: "ContainerName",
-		K8sPodName:    "PodName",
-		K8sNamespace:  "Namespace",
-		ID:            200,
+		ContainerID:  "ContainerID",
+		K8sPodName:   "PodName",
+		K8sNamespace: "Namespace",
+		ID:           200,
 		Labels: models.Labels{
 			"k8s:io.cilium.k8s.policy.cluster=default",
 			"k8s:io.cilium.k8s.policy.serviceaccount=default",
@@ -34,7 +33,7 @@ func TestGetCiliumEndpointStatus(t *testing.T) {
 		},
 		State: models.EndpointStateWaitingDashForDashIdentity.Pointer(),
 	}
-	e, err := NewEndpointFromChangeModel(p, nil, nil, m, nil)
+	e, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, m, nil)
 	require.NoError(t, err)
 
 	status := e.GetCiliumEndpointStatus()
@@ -43,12 +42,7 @@ func TestGetCiliumEndpointStatus(t *testing.T) {
 	require.Equal(t, string(models.EndpointStateWaitingDashForDashIdentity), status.State)
 	require.Nil(t, status.Log)
 	require.Equal(t, &models.EndpointIdentifiers{
-		ContainerID:     "ContainerID",
 		CniAttachmentID: "ContainerID",
-		ContainerName:   "ContainerName",
-		K8sNamespace:    "Namespace",
-		K8sPodName:      "PodName",
-		PodName:         "Namespace/PodName",
 	}, status.ExternalIdentifiers)
 	require.Nil(t, status.Identity)
 	require.Equal(t, &v2.EndpointNetworking{Addressing: []*v2.AddressPair{{IPV4: "192.168.1.100", IPV6: "f00d::a10:0:0:abcd"}}, NodeIP: "<nil>"}, status.Networking)
@@ -65,11 +59,10 @@ func TestGetCiliumEndpointStatusWithServiceAccount(t *testing.T) {
 			IPv4: "192.168.1.100",
 			IPv6: "f00d::a10:0:0:abcd",
 		},
-		ContainerID:   "ContainerID",
-		ContainerName: "ContainerName",
-		K8sPodName:    "PodName",
-		K8sNamespace:  "Namespace",
-		ID:            200,
+		ContainerID:  "ContainerID",
+		K8sPodName:   "PodName",
+		K8sNamespace: "Namespace",
+		ID:           200,
 		Labels: models.Labels{
 			"k8s:io.cilium.k8s.policy.cluster=default",
 			"k8s:io.cilium.k8s.policy.serviceaccount=test-service-account",
@@ -78,7 +71,7 @@ func TestGetCiliumEndpointStatusWithServiceAccount(t *testing.T) {
 		},
 		State: models.EndpointStateWaitingDashForDashIdentity.Pointer(),
 	}
-	e, err := NewEndpointFromChangeModel(p, nil, nil, m, nil)
+	e, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, m, nil)
 	require.NoError(t, err)
 
 	// Create a mock pod with ServiceAccount
@@ -101,12 +94,7 @@ func TestGetCiliumEndpointStatusWithServiceAccount(t *testing.T) {
 	require.Equal(t, string(models.EndpointStateWaitingDashForDashIdentity), status.State)
 	require.Nil(t, status.Log)
 	require.Equal(t, &models.EndpointIdentifiers{
-		ContainerID:     "ContainerID",
 		CniAttachmentID: "ContainerID",
-		ContainerName:   "ContainerName",
-		K8sNamespace:    "Namespace",
-		K8sPodName:      "PodName",
-		PodName:         "Namespace/PodName",
 	}, status.ExternalIdentifiers)
 	require.Nil(t, status.Identity)
 	require.Equal(t, &v2.EndpointNetworking{Addressing: []*v2.AddressPair{{IPV4: "192.168.1.100", IPV6: "f00d::a10:0:0:abcd"}}, NodeIP: "<nil>"}, status.Networking)

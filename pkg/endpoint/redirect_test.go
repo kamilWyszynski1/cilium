@@ -27,12 +27,13 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/policy/compute"
 	policyTypes "github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/proxy/endpoint"
 	"github.com/cilium/cilium/pkg/revert"
 	"github.com/cilium/cilium/pkg/testutils"
+	testcompute "github.com/cilium/cilium/pkg/testutils/compute"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
-	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 	testpolicy "github.com/cilium/cilium/pkg/testutils/policy"
 	fakewireguard "github.com/cilium/cilium/pkg/wireguard/fake"
 )
@@ -70,6 +71,7 @@ func setupRedirectSuite(tb testing.TB) *RedirectSuite {
 	s.do.idmgr = identitymanager.NewIDManager(logger)
 	s.do.repo = policy.NewPolicyRepository(logger, identityCache, nil, envoypolicy.NewEnvoyL7RulesTranslator(logger, certificatemanager.NewMockSecretManagerInline()), s.do.idmgr, testpolicy.NewPolicyMetricsNoop())
 	s.do.repo.GetSelectorCache().SetLocalIdentityNotifier(testidentity.NewDummyIdentityNotifier())
+	s.do.fetcher = testcompute.InstantiateCellForTesting(tb, logger, "endpoint", "setupRedirectSuite", s.do.repo, s.do.idmgr)
 
 	s.rsp = &RedirectSuiteProxy{
 		parserProxyPortMap: map[string]uint16{
@@ -114,12 +116,13 @@ func (r *RedirectSuiteProxy) RemoveRedirect(id string) {
 }
 
 // UpdateNetworkPolicy does nothing.
-func (r *RedirectSuiteProxy) UpdateNetworkPolicy(ep endpoint.EndpointUpdater, policy *policy.EndpointPolicy, wg *completion.WaitGroup) (error, func() error) {
-	return nil, nil
+func (r *RedirectSuiteProxy) UpdateNetworkPolicy(ctx context.Context, ep endpoint.EndpointUpdater, policy *policy.EndpointPolicy, wg *completion.WaitGroup) (error, revert.RevertFunc, revert.FinalizeFunc) {
+	return nil, nil, nil
 }
 
 // RemoveNetworkPolicy does nothing.
-func (r *RedirectSuiteProxy) RemoveNetworkPolicy(ep endpoint.EndpointInfoSource) {}
+func (r *RedirectSuiteProxy) RemoveNetworkPolicy(ctx context.Context, ep endpoint.EndpointInfoSource) {
+}
 
 // UpdateSDP does nothing.
 func (r *RedirectSuiteProxy) UpdateSDP(rules map[identity.NumericIdentity]policy.SelectorPolicy) {
@@ -137,8 +140,9 @@ func (r *RedirectSuiteProxy) IsSDPEnabled() bool {
 
 // DummyOwner implements pkg/endpoint/regeneration/Owner. Used for unit testing.
 type DummyOwner struct {
-	repo  policy.PolicyRepository
-	idmgr identitymanager.IDManager
+	repo    policy.PolicyRepository
+	fetcher compute.PolicyRecomputer
+	idmgr   identitymanager.IDManager
 }
 
 // GetNodeSuffix does nothing.
@@ -165,17 +169,17 @@ const (
 func (s *RedirectSuite) createTestEndpointParams(tb testing.TB) EndpointParams {
 	logger := hivetest.Logger(tb)
 	return EndpointParams{
-		Logger:           logger,
-		EPBuildQueue:     &MockEndpointBuildQueue{},
-		Orchestrator:     &fakeendpoint.FakeOrchestrator{},
-		PolicyRepo:       s.do.repo,
-		IdentityManager:  s.do.idmgr,
-		NamedPortsGetter: testipcache.NewMockIPCache(),
-		IPSecConfig:      fakeipsec.Config{},
-		WgConfig:         fakewireguard.Config{},
-		CTMapGC:          ctmap.NewFakeGCRunner(),
-		Allocator:        testidentity.NewMockIdentityAllocator(nil),
-		LocalNodeStore:   &fakeNodeGetter{},
+		Logger:          logger,
+		EPBuildQueue:    &MockEndpointBuildQueue{},
+		Orchestrator:    &fakeendpoint.FakeOrchestrator{},
+		PolicyRepo:      s.do.repo,
+		PolicyFetcher:   s.do.fetcher,
+		IdentityManager: s.do.idmgr,
+		IPSecConfig:     fakeipsec.Config{},
+		WgConfig:        fakewireguard.Config{},
+		CTMapGC:         ctmap.NewFakeGCRunner(),
+		Allocator:       testidentity.NewMockIdentityAllocator(nil),
+		LocalNodeStore:  &fakeNodeGetter{},
 	}
 }
 
@@ -200,9 +204,13 @@ func (s *RedirectSuite) NewTestEndpoint(t *testing.T) *Endpoint {
 	return ep
 }
 
-func (s *RedirectSuite) AddRules(rules api.Rules) {
+func (s *RedirectSuite) AddRules(rules api.Rules) uint64 {
 	repo := s.do.repo.(*policy.Repository)
-	repo.MustAddList(rules)
+	orig := repo.GetRevision()
+	slice, rev := repo.MustAddList(rules)
+	affected := slice.AllIdentitySelections()
+	s.do.fetcher.UpdatePolicy(affected, orig, rev)
+	return rev
 }
 
 func (s *RedirectSuite) TearDownTest(t *testing.T) {
@@ -321,6 +329,16 @@ func (e *Endpoint) ValidateRuleLabels(t *testing.T, expectedLabels LabelArrayLis
 	t.Helper()
 
 	desiredLabels := e.GetDesiredPolicyRuleLabels()
+	for k, v := range expectedLabels {
+		if k.Identity == 0 {
+			for _, nid := range policy.AllAggregates {
+				newKey := k.WithIdentity(nid)
+				if _, ok := expectedLabels[newKey]; !ok {
+					expectedLabels[newKey] = v
+				}
+			}
+		}
+	}
 
 	if !desiredLabels.Equals(expectedLabels) {
 		t.Fatal("desired policy labels do not equal expected labels:\n",
@@ -355,7 +373,7 @@ func TestRedirectWithDeny(t *testing.T) {
 	ep := s.NewTestEndpoint(t)
 
 	// Policy denies anything to "foo"
-	s.AddRules(api.Rules{
+	s.datapathRegenCtxt.policyRevisionToWaitFor = s.AddRules(api.Rules{
 		ruleL3DenyFoo.WithEndpointSelector(selectBar_),
 		ruleL4L7Allow.WithEndpointSelector(selectBar_),
 	})
@@ -369,11 +387,11 @@ func TestRedirectWithDeny(t *testing.T) {
 	// entries and make any conclusions from it.
 	require.Len(t, ep.desiredPolicy.Redirects, 1)
 
-	expected := policy.MapStateMap{
+	expected := fillAggregates(policy.MapStateMap{
 		mapKeyAllowAllE: policyTypes.AllowEntry(),
 		mapKeyAllL7:     policyTypes.AllowEntry().WithProxyPort(httpPort).WithListenerPriority(policy.ListenerPriorityHTTP),
 		mapKeyFoo:       policyTypes.DenyEntry(),
-	}
+	})
 
 	ep.ValidateRuleLabels(t, LabelArrayListMap{
 		mapKeyAllowAllE: labels.LabelArrayList{AllowAnyEgressLabels},
@@ -390,7 +408,7 @@ func TestRedirectWithDeny(t *testing.T) {
 
 	// Check that the redirect is realized
 	require.Len(t, ep.desiredPolicy.Redirects, 1)
-	require.Equal(t, 3, ep.desiredPolicy.Len())
+	require.Equal(t, 1+2*len(policy.AllAggregates), ep.desiredPolicy.Len())
 
 	// Pretend that something failed and revert the changes
 	s.datapathRegenCtxt.revertStack.Revert()
@@ -484,7 +502,7 @@ func TestRedirectWithPriority(t *testing.T) {
 	api.TestAllowIngressListener = true
 	defer func() { api.TestAllowIngressListener = false }()
 
-	s.AddRules(api.Rules{
+	s.datapathRegenCtxt.policyRevisionToWaitFor = s.AddRules(api.Rules{
 		ruleL4AllowListener1.WithEndpointSelector(selectBar_),
 		ruleL4AllowPort80.WithEndpointSelector(selectBar_),
 		ruleL4L7AllowListener2Priority1.WithEndpointSelector(selectBar_),
@@ -498,11 +516,11 @@ func TestRedirectWithPriority(t *testing.T) {
 	require.Equal(t, crd1Port, ep.desiredPolicy.Redirects["12345:ingress:TCP:80:/cec1/listener1"])
 	require.Len(t, ep.desiredPolicy.Redirects, 2)
 
-	expected := policy.MapStateMap{
+	expected := fillAggregates(policy.MapStateMap{
 		mapKeyAllowAllE: policyTypes.AllowEntry(),
 		mapKeyFooL7:     policyTypes.AllowEntry().WithProxyPort(crd2Port).WithListenerPriority(1),
 		mapKeyAllL7:     policyTypes.AllowEntry(),
-	}
+	})
 	ep.ValidateRuleLabels(t, LabelArrayListMap{
 		mapKeyAllowAllE: labels.LabelArrayList{AllowAnyEgressLabels},
 		mapKeyFooL7:     labels.LabelArrayList{lblsL4L7AllowListener2Priority1},
@@ -515,7 +533,7 @@ func TestRedirectWithPriority(t *testing.T) {
 
 	// Check that the redirect is realized
 	require.Len(t, ep.desiredPolicy.Redirects, 2)
-	require.Equal(t, 3, ep.desiredPolicy.Len())
+	require.Equal(t, 1+2*len(policy.AllAggregates), ep.desiredPolicy.Len())
 
 	// Pretend that something failed and revert the changes
 	s.datapathRegenCtxt.revertStack.Revert()
@@ -537,7 +555,7 @@ func TestRedirectWithEqualPriority(t *testing.T) {
 
 	api.TestAllowIngressListener = true
 	defer func() { api.TestAllowIngressListener = false }()
-	s.AddRules(api.Rules{
+	s.datapathRegenCtxt.policyRevisionToWaitFor = s.AddRules(api.Rules{
 		ruleL4L7AllowListener1Priority1.WithEndpointSelector(selectBar_),
 		ruleL4AllowPort80.WithEndpointSelector(selectBar_),
 		ruleL4L7AllowListener2Priority1.WithEndpointSelector(selectBar_),
@@ -551,11 +569,11 @@ func TestRedirectWithEqualPriority(t *testing.T) {
 	require.Equal(t, crd1Port, ep.desiredPolicy.Redirects["12345:ingress:TCP:80:/cec1/listener1"])
 	require.Len(t, ep.desiredPolicy.Redirects, 2)
 
-	expected := policy.MapStateMap{
+	expected := fillAggregates(policy.MapStateMap{
 		mapKeyAllowAllE: policyTypes.AllowEntry(),
 		mapKeyFooL7:     policyTypes.AllowEntry().WithProxyPort(crd1Port).WithListenerPriority(1),
 		mapKeyAllL7:     policyTypes.AllowEntry(),
-	}
+	})
 	ep.ValidateRuleLabels(t, LabelArrayListMap{
 		mapKeyAllowAllE: labels.LabelArrayList{AllowAnyEgressLabels},
 		mapKeyFooL7:     labels.LabelArrayList{lblsL4L7AllowListener1Priority1, lblsL4L7AllowListener2Priority1}, // lblsL4AllowPort80
@@ -568,7 +586,7 @@ func TestRedirectWithEqualPriority(t *testing.T) {
 
 	// Check that the redirect is realized
 	require.Len(t, ep.desiredPolicy.Redirects, 2)
-	require.Equal(t, 3, ep.desiredPolicy.Len())
+	require.Equal(t, 1+2*len(policy.AllAggregates), ep.desiredPolicy.Len())
 
 	// Pretend that something failed and revert the changes
 	s.datapathRegenCtxt.revertStack.Revert()
@@ -581,4 +599,18 @@ func TestRedirectWithEqualPriority(t *testing.T) {
 		t.Fatal("desired policy map does not equal expected map:\n",
 			ep.desiredPolicy.Diff(expected))
 	}
+}
+
+func fillAggregates(ms policy.MapStateMap) policy.MapStateMap {
+	for k, v := range ms {
+		if k.Identity == 0 {
+			for _, nid := range policy.AllAggregates {
+				newKey := k.WithIdentity(nid)
+				if _, ok := ms[newKey]; !ok {
+					ms[newKey] = v
+				}
+			}
+		}
+	}
+	return ms
 }

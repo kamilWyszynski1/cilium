@@ -37,7 +37,7 @@ var ipamNodeIntervalControllerGroup = controller.NewGroup("ipam-node-interval-re
 // NodeOperations implementation which performs operations in the context of
 // that node.
 type NodeOperations interface {
-	// UpdateNode is called when an update to the CiliumNode is received.
+	// UpdatedNode is called when an update to the CiliumNode is received.
 	UpdatedNode(obj *v2.CiliumNode)
 
 	// PopulateStatusFields is called to give the implementation a chance
@@ -96,6 +96,28 @@ type NodeOperations interface {
 
 	// IsPrefixDelegated helps identify if a node supports prefix delegation
 	IsPrefixDelegated() bool
+
+	// GetAttachedCIDRs returns the CIDRs currently attached to the node's
+	// network interfaces, as observed by the cloud-specific implementation.
+	// Used by multi-pool mode to reconcile the tracking map against ground
+	// truth (drop CIDRs no longer attached, seed releases that survived an
+	// operator restart). Implementations that do not support multi-pool may
+	// return nil.
+	GetAttachedCIDRs() []netip.Prefix
+
+	// PrepareCIDRRelease maps released CIDRs back to their source
+	// network interfaces and returns release actions grouped by interface.
+	// Used by multi-pool mode where the agent removes CIDRs from
+	// Allocated instead of participating in the IP release handshake.
+	PrepareCIDRRelease(releasedCIDRs []netip.Prefix) []*ReleaseAction
+
+	// ReleaseCIDRs performs the release of the CIDRs listed in
+	// release.CIDRsToRelease. The cloud-specific implementation is responsible
+	// for appropriately handling single-IP CIDRs and larger ones by dispatching to
+	// the appropriate underlying APIs. Returns the subset of CIDRs that were
+	// successfully released so the caller can prune its tracking state even on
+	// partial failure.
+	ReleaseCIDRs(ctx context.Context, release *ReleaseAction) (released []netip.Prefix, err error)
 }
 
 // AllocationImplementation is the interface an implementation must provide.
@@ -155,14 +177,15 @@ type MetricsNodeAPI interface {
 	DeleteNode(node string)
 }
 
-// nodeMap is a mapping of node names to ENI nodes
+// nodeMap is a mapping of node names to nodes
 type nodeMap map[string]*Node
 
-// NodeManager manages all nodes with ENIs
+// NodeManager manages all nodes
 type NodeManager struct {
 	logger               *slog.Logger
 	mutex                lock.RWMutex
 	nodes                nodeMap
+	resyncController     *controller.Manager
 	instancesAPI         AllocationImplementation
 	k8sAPI               allocator.CiliumNodeGetterUpdater
 	metricsAPI           MetricsAPI
@@ -191,6 +214,7 @@ func NewNodeManager(logger *slog.Logger, instancesAPI AllocationImplementation, 
 	mngr := &NodeManager{
 		logger:               logger,
 		nodes:                nodeMap{},
+		resyncController:     controller.NewManager(),
 		instancesAPI:         instancesAPI,
 		k8sAPI:               k8sAPI,
 		metricsAPI:           metrics,
@@ -213,7 +237,7 @@ func (n *NodeManager) instancesAPIResync(ctx context.Context) (time.Time, error)
 	return syncTime, err
 }
 
-// Start kicks of the NodeManager by performing the initial state
+// Start kicks off the NodeManager by performing the initial state
 // synchronization and starting the background sync goroutine
 func (n *NodeManager) Start(ctx context.Context) error {
 	// Trigger the initial resync in a blocking manner
@@ -226,8 +250,7 @@ func (n *NodeManager) Start(ctx context.Context) error {
 	// event driven trigger fails, and also release excess IP addresses
 	// if release-excess-ips is enabled
 	go func() {
-		mngr := controller.NewManager()
-		mngr.UpdateController("ipam-node-interval-refresh",
+		n.resyncController.UpdateController("ipam-node-interval-refresh",
 			controller.ControllerParams{
 				Group:       ipamNodeIntervalControllerGroup,
 				RunInterval: time.Minute,
@@ -246,6 +269,10 @@ func (n *NodeManager) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func (n *NodeManager) Stop() {
+	n.resyncController.RemoveAllAndWait()
 }
 
 // SetInstancesAPIReadiness sets the readiness state of the instances API
@@ -292,12 +319,13 @@ func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 				ipsMarkedForRelease: make(map[netip.Addr]time.Time),
 				ipReleaseStatus:     make(map[netip.Addr]string),
 			},
-			excessIPReleaseDelay: time.Duration(n.excessIPReleaseDelay) * time.Second,
+			excessIPReleaseDelay:           time.Duration(n.excessIPReleaseDelay) * time.Second,
+			multiPoolCIDRsMarkedForRelease: make(map[netip.Prefix]time.Time),
 		}
 		node.logger.Store(node.rootLogger.With(fieldName, resource.Name))
 
 		ctx, cancel := context.WithCancel(context.Background())
-		// InstanceAPI is stale and the instances API is stable then do resync instancesAPI to sync instances
+		// If InstanceAPI is stale and the instances API is stable then do resync instancesAPI to sync instances
 		if !n.instancesAPI.HasInstance(resource.InstanceID()) && n.stableInstancesAPI {
 			if _, err := n.instancesAPI.InstanceSync(ctx, resource.InstanceID()); err != nil {
 				node.logger.Load().Warn("Failed to resync the instance from the API after new node was found", logfields.Error, err)
@@ -416,7 +444,7 @@ func (n *NodeManager) Delete(resource *v2.CiliumNode) {
 	// Delete the instance from instanceManager. This will cause Update() to
 	// invoke instancesAPIResync if this instance rejoins the cluster.
 	// This ensures that Node.recalculate() does not use stale data for
-	// instances which rejoin the cluster after their EC2 configuration has changed.
+	// instances which rejoin the cluster after their configuration has changed.
 	if resource.Spec.InstanceID != "" {
 		n.instancesAPI.DeleteInstance(resource.Spec.InstanceID)
 	}

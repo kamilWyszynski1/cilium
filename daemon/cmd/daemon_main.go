@@ -35,6 +35,7 @@ import (
 	endpointTypes "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/envoy"
+	util "github.com/cilium/cilium/pkg/envoy/util"
 	"github.com/cilium/cilium/pkg/flowdebug"
 	"github.com/cilium/cilium/pkg/hive"
 	"github.com/cilium/cilium/pkg/identity"
@@ -780,7 +781,7 @@ func InitGlobalFlags(logger *slog.Logger, cmd *cobra.Command, vp *viper.Viper) {
 	flags.MarkHidden(option.EnableCiliumClusterwideNetworkPolicy)
 	option.BindEnv(vp, option.EnableCiliumClusterwideNetworkPolicy)
 
-	flags.StringSlice(option.PolicyCIDRMatchMode, defaults.PolicyCIDRMatchMode, "The entities that can be selected by CIDR policy. Supported values: 'nodes'")
+	flags.StringSlice(option.PolicyCIDRMatchMode, defaults.PolicyCIDRMatchMode, "The entities that can be selected by CIDR policy. Supported values: 'nodes', 'pods'")
 	option.BindEnv(vp, option.PolicyCIDRMatchMode)
 
 	flags.Duration(option.MaxInternalTimerDelay, defaults.MaxInternalTimerDelay, "Maximum internal timer value across the entire agent. Use in test environments to detect race conditions in agent logic.")
@@ -952,7 +953,7 @@ func initEnv(logger *slog.Logger, vp *viper.Viper) {
 
 	// Creating Envoy sockets directory for cases which doesn't provide a volume mount
 	// (e.g. embedded Envoy, external workload in ClusterMesh scenario)
-	if err := os.MkdirAll(envoy.GetSocketDir(option.Config.RunDir), defaults.RuntimePathRights); err != nil {
+	if err := os.MkdirAll(util.GetSocketDir(option.Config.RunDir), defaults.RuntimePathRights); err != nil {
 		logging.Fatal(scopedLog, "Could not create envoy sockets directory", logfields.Error, err)
 	}
 
@@ -1062,8 +1063,8 @@ func initEnv(logger *slog.Logger, vp *viper.Viper) {
 		logging.Fatal(logger, "Option "+option.EnableRemoteNodeMasquerade+" requires BPF masquerade to be enabled ("+option.EnableBPFMasquerade+")")
 	}
 
-	if option.Config.TunnelingEnabled() && option.Config.EnableAutoDirectRouting {
-		logging.Fatal(logger, fmt.Sprintf("%s cannot be used with tunneling. Packets must be routed through the tunnel device.", option.EnableAutoDirectRoutingName))
+	if !option.Config.RequiresNativeRouting() && option.Config.EnableAutoDirectRouting {
+		logging.Fatal(logger, fmt.Sprintf("%s requires native or hybrid routing mode.", option.EnableAutoDirectRoutingName))
 	}
 
 	initClockSourceOption(logger)
@@ -1088,11 +1089,8 @@ func initEnv(logger *slog.Logger, vp *viper.Viper) {
 
 	if option.Config.LocalRouterIPv4 != "" || option.Config.LocalRouterIPv6 != "" {
 		// TODO(weil0ng): add a proper check for ipam in PR# 15429.
-		if option.Config.TunnelingEnabled() {
-			logging.Fatal(logger, fmt.Sprintf("Cannot specify %s or %s in tunnel mode.", option.LocalRouterIPv4, option.LocalRouterIPv6))
-		}
-		if !option.Config.EnableEndpointRoutes {
-			logging.Fatal(logger, fmt.Sprintf("Cannot specify %s or %s  without %s.", option.LocalRouterIPv4, option.LocalRouterIPv6, option.EnableEndpointRoutes))
+		if !option.Config.RequiresNativeRouting() {
+			logging.Fatal(logger, fmt.Sprintf("%s and %s require native or hybrid routing mode.", option.LocalRouterIPv4, option.LocalRouterIPv6))
 		}
 	}
 

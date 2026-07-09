@@ -17,6 +17,7 @@ import (
 	"github.com/cilium/cilium/operator/pkg/ipam/allocator"
 	"github.com/cilium/cilium/operator/pkg/ipam/allocator/clusterpool/cidralloc"
 	"github.com/cilium/cilium/pkg/controller"
+	iputil "github.com/cilium/cilium/pkg/ip"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -62,7 +63,7 @@ type ErrCIDRAllocated struct {
 	cidr netip.Prefix
 }
 
-// Error returns the human-readable error for the ErrAllocatorNotFound
+// Error returns the human-readable error for the ErrCIDRAllocated
 func (e *ErrCIDRAllocated) Error() string {
 	return fmt.Sprintf("requested CIDR (%s) is already allocated", e.cidr)
 }
@@ -88,23 +89,20 @@ func (e ErrNoAllocators) Error() string {
 	)
 }
 
-// parsePodCIDRs will return the v4 and v6 CIDRs found in the podCIDRs.
-// Returns an error in case one of the CIDRs are not valid.
-func parsePodCIDRs(podCIDRs []string) (*nodeCIDRs, error) {
+// splitPodCIDRs splits podCIDRs into masked v4 and v6 prefixes. The prefixes are
+// already parsed and validated at the CRD boundary, so this only needs to mask
+// and sort them by family.
+func splitPodCIDRs(podCIDRs []iputil.Prefix) *nodeCIDRs {
 	var cidrs nodeCIDRs
 	for _, podCIDR := range podCIDRs {
-		prefix, err := netip.ParsePrefix(podCIDR)
-		if err != nil {
-			return nil, err
-		}
-		prefix = prefix.Masked()
+		prefix := podCIDR.Masked()
 		if prefix.Addr().Is4() {
 			cidrs.v4PodCIDRs = append(cidrs.v4PodCIDRs, prefix)
 		} else {
 			cidrs.v6PodCIDRs = append(cidrs.v6PodCIDRs, prefix)
 		}
 	}
-	return &cidrs, nil
+	return &cidrs
 }
 
 // nodeCIDRs is a wrapper that contains all the podCIDRs a node can have.
@@ -236,6 +234,10 @@ func NewNodesPodCIDRManager(
 	n.k8sReSync = t
 
 	return n
+}
+
+func (n *NodesPodCIDRManager) Stop() {
+	n.k8sReSyncController.RemoveAllAndWait()
 }
 
 // syncToK8s will sync all nodes present in the ciliumNodesToK8s into kubernetes
@@ -454,12 +456,12 @@ func (n *NodesPodCIDRManager) allocateNode(node *v2.CiliumNode) (cn *v2.CiliumNo
 			// rebuild the spec to match. upsertLocked will detect the
 			// change and issue a k8sOpUpdate.
 			if nodeCIDRs, ok := n.nodes[node.Name]; ok {
-				cn.Spec.IPAM.PodCIDRs = make([]string, 0, len(nodeCIDRs.v4PodCIDRs)+len(nodeCIDRs.v6PodCIDRs))
+				cn.Spec.IPAM.PodCIDRs = make([]iputil.Prefix, 0, len(nodeCIDRs.v4PodCIDRs)+len(nodeCIDRs.v6PodCIDRs))
 				for _, p := range nodeCIDRs.v4PodCIDRs {
-					cn.Spec.IPAM.PodCIDRs = append(cn.Spec.IPAM.PodCIDRs, p.String())
+					cn.Spec.IPAM.PodCIDRs = append(cn.Spec.IPAM.PodCIDRs, iputil.PrefixFrom(p))
 				}
 				for _, p := range nodeCIDRs.v6PodCIDRs {
-					cn.Spec.IPAM.PodCIDRs = append(cn.Spec.IPAM.PodCIDRs, p.String())
+					cn.Spec.IPAM.PodCIDRs = append(cn.Spec.IPAM.PodCIDRs, iputil.PrefixFrom(p))
 				}
 			}
 			err = nil
@@ -491,12 +493,7 @@ func (n *NodesPodCIDRManager) allocateNode(node *v2.CiliumNode) (cn *v2.CiliumNo
 			logfields.Allocated, allocated,
 		)
 	} else {
-		cidrs, err = parsePodCIDRs(node.Spec.IPAM.PodCIDRs)
-		if err != nil {
-			// We want to log this error in cilium node
-			updateStatus = true
-			return
-		}
+		cidrs = splitPodCIDRs(node.Spec.IPAM.PodCIDRs)
 		// Try to allocate the podCIDRs in the node, if there was a need
 		// for new CIDRs to be allocated the allocated returned value will be
 		// set to true.
@@ -535,13 +532,13 @@ func (n *NodesPodCIDRManager) allocateNode(node *v2.CiliumNode) (cn *v2.CiliumNo
 
 	cn = node.DeepCopy()
 
-	cn.Spec.IPAM.PodCIDRs = make([]string, 0, len(cidrs.v4PodCIDRs)+len(cidrs.v6PodCIDRs))
+	cn.Spec.IPAM.PodCIDRs = make([]iputil.Prefix, 0, len(cidrs.v4PodCIDRs)+len(cidrs.v6PodCIDRs))
 
 	for _, v4CIDR := range cidrs.v4PodCIDRs {
-		cn.Spec.IPAM.PodCIDRs = append(cn.Spec.IPAM.PodCIDRs, v4CIDR.String())
+		cn.Spec.IPAM.PodCIDRs = append(cn.Spec.IPAM.PodCIDRs, iputil.PrefixFrom(v4CIDR))
 	}
 	for _, v6CIDR := range cidrs.v6PodCIDRs {
-		cn.Spec.IPAM.PodCIDRs = append(cn.Spec.IPAM.PodCIDRs, v6CIDR.String())
+		cn.Spec.IPAM.PodCIDRs = append(cn.Spec.IPAM.PodCIDRs, iputil.PrefixFrom(v6CIDR))
 	}
 
 	cn.Status.IPAM.OperatorStatus.Error = ""
@@ -673,7 +670,7 @@ func (n *NodesPodCIDRManager) reuseIPNets(
 	)
 
 	// The node might want to allocate a new IPv4 podCIDR but it already
-	// has a IPv6 podCIDR. We will only allocate new podCIDRs if
+	// has an IPv6 podCIDR. We will only allocate new podCIDRs if
 	// canAllocateIPv4PodCIDRs is set to true. It's fine that we don't allocate
 	// it now since this node will be put into the map of nodes that require
 	// to be allocated in the future.
@@ -710,7 +707,7 @@ func (n *NodesPodCIDRManager) reuseIPNets(
 	}
 
 	// The node might want to allocate a new IPv6 podCIDR but it already
-	// has a IPv4 podCIDR. We will only allocate new podCIDRs if
+	// has an IPv4 podCIDR. We will only allocate new podCIDRs if
 	// canAllocateIPv6PodCIDRs is set to true. It's fine that we don't allocate
 	// it now since this node will be put into the map of nodes that require
 	// to be allocated in the future.
@@ -766,7 +763,7 @@ func (n *NodesPodCIDRManager) reuseIPNets(
 }
 
 // allocateIPNet allocates the `newCidr` in the cidrSet allocator. If the
-// the `newCIDR` is already allocated an error is returned.
+// `newCIDR` is already allocated an error is returned.
 // In case the function returns successfully, it's up to the caller to execute
 // the revert function provided to revert all state made. If the function
 // returns an error the caller of this function can assume no state was
@@ -830,7 +827,7 @@ func allocateIPNet(allType allocatorType, cidrSets []cidralloc.CIDRAllocator, ne
 			break
 		}
 		// If we were unable to occupy the CIDRs on any allocators then return
-		// immediately as one of the CIDR allocators should be have been able
+		// immediately as one of the CIDR allocators should have been able
 		// to allocate this new CIDR. 'err' is set with the appropriate error.
 		if err != nil {
 			return

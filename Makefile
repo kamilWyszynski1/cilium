@@ -26,10 +26,6 @@ SUBDIR_RELAY_CONTAINER := hubble-relay
 SUBDIR_CLUSTERMESH_APISERVER_CONTAINER := clustermesh-apiserver
 SUBDIR_STANDALONE_DNS_PROXY_CONTAINER := standalone-dns-proxy
 
-ifdef LIBNETWORK_PLUGIN
-SUBDIRS_CILIUM_CONTAINER += plugins/cilium-docker
-endif
-
 # Add the ability to override variables
 -include Makefile.override
 
@@ -53,9 +49,9 @@ BENCH_EVAL := "."
 BENCH ?= $(BENCH_EVAL)
 BENCHFLAGS_EVAL := -bench=$(BENCH) -run=^$$ -benchtime=10s
 BENCHFLAGS ?= $(BENCHFLAGS_EVAL)
-SKIP_KVSTORES ?= "false"
-SKIP_K8S_CODE_GEN_CHECK ?= "true"
-SKIP_CUSTOMVET_CHECK ?= "false"
+SKIP_KVSTORES ?= false
+SKIP_K8S_CODE_GEN_CHECK ?= true
+SKIP_CUSTOMVET_CHECK ?= false
 
 JOB_BASE_NAME ?= cilium_test
 
@@ -108,7 +104,7 @@ tests-privileged: ## Run Go tests including ones that require elevated privilege
 	$(MAKE) generate-cov
 
 start-kvstores: ## Start running kvstores (etcd container) for integration tests.
-ifeq ($(SKIP_KVSTORES),"false")
+ifeq ($(SKIP_KVSTORES),false)
 	@echo Starting key-value store container...
 	-$(QUIET)$(CONTAINER_ENGINE) rm -f "cilium-etcd-test-container" 2> /dev/null
 	$(QUIET)$(CONTAINER_ENGINE) run -d \
@@ -125,7 +121,7 @@ ifeq ($(SKIP_KVSTORES),"false")
 endif
 
 stop-kvstores: ## Forcefully removes running kvstore components (etcd container) for integration tests.
-ifeq ($(SKIP_KVSTORES),"false")
+ifeq ($(SKIP_KVSTORES),false)
 	$(QUIET)$(CONTAINER_ENGINE) rm -f "cilium-etcd-test-container"
 endif
 
@@ -251,7 +247,7 @@ manifests: ## Generate K8s manifests e.g. CRD, RBAC etc.
 	contrib/scripts/k8s-manifests-gen.sh
 
 .PHONY: generate-apis
-generate-apis: generate-api generate-health-api generate-hubble-api generate-operator-api generate-kvstoremesh-api generate-sdp-api generate-datapathplugins-api
+generate-apis: generate-api generate-health-api generate-hubble-api generate-operator-api generate-kvstoremesh-api generate-sdp-api generate-datapathplugins-api generate-clustermesh-api
 
 generate-api: api/v1/openapi.yaml ## Generate cilium-agent client, model and server code from openapi spec.
 	@$(ECHO_GEN)api/v1/openapi.yaml
@@ -363,6 +359,26 @@ github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1beta1
 github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/util/intstr
 endef
 
+define CLUSTERMESH_PROTO_PACKAGES
+-github.com/cilium/cilium/pkg/k8s/slim/k8s/api/discovery/v1
+github.com/cilium/cilium/pkg/clustermesh/types/endpointslice/internal
+endef
+
+.PHONY: generate-clustermesh-api-local
+generate-clustermesh-api-local:
+	$(ASSERT_CILIUM_MODULE)
+
+	$(eval TMPDIR := $(shell mktemp -d -t cilium.tmpXXXXXXXX))
+
+	$(QUIET) $(call generate_k8s_protobuf,${CLUSTERMESH_PROTO_PACKAGES},"$(TMPDIR)")
+
+	$(QUIET) rm -rf "$(TMPDIR)"
+
+.PHONY: generate-clustermesh-api
+generate-clustermesh-api:
+	contrib/scripts/builder.sh \
+		$(MAKE_CONTAINER) -C /go/src/github.com/cilium/cilium/ generate-clustermesh-api-local
+
 .PHONY: generate-k8s-api-local
 generate-k8s-api-local:
 	$(ASSERT_CILIUM_MODULE)
@@ -376,22 +392,26 @@ generate-k8s-api-local:
 
 .PHONY: generate-k8s-api
 generate-k8s-api: ## Generate Cilium k8s API client, deepcopy and deepequal Go sources.
+	@$(ECHO_DOCKER)
 	contrib/scripts/builder.sh \
-		$(MAKE_CONTAINER) -C /go/src/github.com/cilium/cilium/ generate-k8s-api-local
+		$(MAKE_CONTAINER) -C /go/src/github.com/cilium/cilium/ generate-k8s-api-local V=$(V)
 
 .PHONY: generate-bpf
 generate-bpf: ## Generate config structs from BPF objects using dpgen and Go skeletons with bpf2go
+	@$(ECHO_DOCKER)
 	contrib/scripts/builder.sh \
-		$(MAKE_CONTAINER) -C /go/src/github.com/cilium/cilium/bpf generate
+		$(MAKE_CONTAINER) -C /go/src/github.com/cilium/cilium/bpf generate V=$(V)
+	@$(ECHO_CHECK) bpf-skel
+	$(QUIET)git status bpf/ pkg/ --porcelain
 
 check-k8s-clusterrole: ## Ensures there is no diff between preflight's clusterrole and runtime's clusterrole.
 	./contrib/scripts/check-preflight-clusterrole.sh
 
 ##@ Development
-reload: ## Reload cilium-agent and cilium-docker systemd service after installing built binaries.
-	sudo systemctl stop cilium cilium-docker
+reload: ## Reload cilium-agent and systemd service after installing built binaries.
+	sudo systemctl stop cilium
 	sudo $(MAKE) install
-	sudo systemctl start cilium cilium-docker
+	sudo systemctl start cilium
 	sleep 6
 	cilium status
 
@@ -480,7 +500,7 @@ fuzz: check-fuzz # Run fuzzer tests briefly for FUZZ_TIME seconds
 	./test/fuzzing/go-fuzz.sh | $(GOTEST_FORMATTER)
 
 precheck: ## Peform build precheck for the source code.
-ifeq ($(SKIP_K8S_CODE_GEN_CHECK),"false")
+ifeq ($(SKIP_K8S_CODE_GEN_CHECK),false)
 	@$(ECHO_CHECK) contrib/scripts/check-k8s-code-gen.sh
 	$(QUIET) contrib/scripts/check-k8s-code-gen.sh
 endif
@@ -492,7 +512,7 @@ endif
 	$(QUIET) contrib/scripts/lock-check.sh
 	@$(ECHO_CHECK) contrib/scripts/check-viper.sh
 	$(QUIET) contrib/scripts/check-viper.sh
-ifeq ($(SKIP_CUSTOMVET_CHECK),"false")
+ifeq ($(SKIP_CUSTOMVET_CHECK),false)
 	@$(ECHO_CHECK) contrib/scripts/custom-vet-check.sh
 	$(QUIET) contrib/scripts/custom-vet-check.sh
 endif
@@ -512,8 +532,6 @@ endif
 	$(QUIET) contrib/scripts/check-datapathconfig.sh
 	@$(ECHO_CHECK) $(GO) run ./tools/slogloggercheck .
 	$(QUIET)$(GO) run ./tools/slogloggercheck .
-	@$(ECHO_CHECK) contrib/scripts/check-fipsonly.sh
-	$(QUIET) contrib/scripts/check-fipsonly.sh
 	$(MAKE) check-fuzz
 
 pprof-heap: ## Get Go pprof heap profile.
@@ -574,7 +592,6 @@ help: ## Display help for the Makefile, from https://www.thapaliya.com/en/writin
 	$(call print_help_line,"docker-cilium-image","Build cilium-agent docker image")
 	$(call print_help_line,"dev-docker-image","Build cilium-agent development docker image")
 	$(call print_help_line,"dev-docker-image-debug","Build cilium-agent development docker debug image")
-	$(call print_help_line,"docker-plugin-image","Build cilium-docker plugin image")
 	$(call print_help_line,"docker-hubble-relay-image","Build hubble-relay docker image")
 	$(call print_help_line,"docker-clustermesh-apiserver-image","Build docker image for Cilium clustermesh APIServer")
 	$(call print_help_line,"docker-operator-image","Build cilium-operator docker image")
@@ -601,6 +618,29 @@ gateway-api-conformance: ## Run Gateway API conformance tests.
 		--all-features \
 		--allow-crds-mismatch\
 		--cleanup-base-resources=false \
+	| $(GOTEST_FORMATTER)
+
+CILIUM_VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || echo "v.0.0.0-`git --no-pager log -1 --pretty='format:%cd-%h' --date='format:%Y%m%d%H%M%S'`" )
+gateway-api-conformance-report: ## Run Gateway API conformance tests with a conformance report.
+	@$(ECHO_CHECK) running Gateway API conformance tests with conformance report...
+	GATEWAY_API_CONFORMANCE_TESTS=1 \
+	GATEWAY_API_CONFORMANCE_USABLE_NETWORK_ADDRESSES=$(GATEWAY_API_CONFORMANCE_USABLE_NETWORK_ADDRESSES) \
+	GATEWAY_API_CONFORMANCE_UNUSABLE_NETWORK_ADDRESSES=$(GATEWAY_API_CONFORMANCE_UNUSABLE_NETWORK_ADDRESSES) \
+	$(GO_TEST) $(GO_TEST_FLAGS) -p 4 -v ./operator/pkg/gateway-api \
+		$(GATEWAY_TEST_FLAGS) \
+		-test.run $(GATEWAY_API_CONFORMANCE_TEST_NAME) \
+		-test.timeout=29m \
+		--gateway-class cilium \
+		--all-features \
+		--allow-crds-mismatch\
+		--cleanup-base-resources=true \
+		--organization cilium \
+		--project cilium \
+		--url github.com/cilium/cilium \
+		--version $(CILIUM_VERSION) \
+		--contact https://github.com/cilium/community/blob/main/roles/Maintainers.md \
+		--conformance-profiles GATEWAY-HTTP,GATEWAY-TLS,GATEWAY-GRPC,MESH-HTTP,MESH-GRPC \
+		--report-output=$(CURDIR)/gateway-api-conformance-report.yaml \
 	| $(GOTEST_FORMATTER)
 
 MCS_API_CONFORMANCE_TEST_NAME ?= TestConformance

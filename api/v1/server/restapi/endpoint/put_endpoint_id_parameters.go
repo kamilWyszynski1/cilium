@@ -10,13 +10,12 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/cilium/cilium/api/v1/models"
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/validate"
-
-	"github.com/cilium/cilium/api/v1/models"
 )
 
 // NewPutEndpointIDParams creates a new PutEndpointIDParams object
@@ -50,11 +49,7 @@ type PutEndpointIDParams struct {
 	  - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595
 	  - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343
 	  - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0
-	  - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)
-	  - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)
-	  - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)
 	  - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1
-	  - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444
 
 	  Required: true
 	  In: path

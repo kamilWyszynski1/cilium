@@ -126,17 +126,37 @@
       "minimumReleaseAge": "5 days"
     },
     {
-      // Do not pin digests for self-referenced cilium/cilium GitHub Actions
-      // and reusable workflows (e.g.,
-      // cilium/cilium/.github/actions/set-commit-status@main or
-      // cilium/cilium/.github/workflows/foo.yaml@v1.17). These are internal
-      // references within the same repository and should not be pinned to a
-      // commit SHA by Renovate.
+      // Do not pin or update digests for self-referenced cilium/cilium GitHub
+      // Actions and reusable workflows (e.g.,
+      // cilium/cilium/.github/actions/set-commit-status@<sha> # main or
+      // cilium/cilium/.github/workflows/foo.yaml@<sha> # v1.17). These are
+      // internal references within the same repository.
       "matchManagers": [
         "github-actions"
       ],
       "matchPackageNames": [
         "cilium/cilium"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pinDigest"
+      ],
+      "enabled": false
+    },
+    {
+      // Do not pin digests for the golangci/golangci-lint dependency that the
+      // github-actions manager auto-extracts from the 'version:' input of the
+      // golangci/golangci-lint-action step. A plain 'version: vX.Y.Z' value has
+      // nowhere to store a commit SHA, so Renovate can never apply the digest
+      // pin and the whole grouped branch fails with "update failure". The
+      // version itself is still tracked through the
+      // 'datasource=docker depName=golangci/golangci-lint' comment handled by
+      // the custom regex manager.
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchPackageNames": [
+        "golangci/golangci-lint"
       ],
       "pinDigests": false
     },
@@ -372,8 +392,6 @@
         // dependency manually.
         "/github.com/onsi/ginkgo/",
         "/github.com/onsi/gomega/*/",
-        // We can't update it, see https://github.com/cilium/cilium/issues/44063 for more info
-        "github.com/cilium/ebpf",
         // The version upgrade from 9.0.4 to 9.1.0 breaks our CI
         "sphinx"
       ]
@@ -819,6 +837,7 @@
       // as we need to update cilium-envoy accordingly.
       "matchPackageNames": [
         "github.com/envoyproxy/go-control-plane/envoy",
+        "github.com/envoyproxy/go-control-plane",
       ],
       "matchUpdateTypes": [
         "patch",
@@ -1085,7 +1104,7 @@
       // similar to the examples shown here:
       //   https://docs.renovatebot.com/modules/manager/regex/#advanced-capture
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>.*?)\\s+.+_REPO:=(?<depName>.*?)\\s+.+_VERSION:=(?<currentValue>.*)\\s+.+_DIGEST:=(?<currentDigest>sha256:[a-f0-9]+)"
+        "# renovate: datasource=(?<datasource>.*?)\\s+.+_REPO[:?]=(?<depName>.*?)\\s+.+_VERSION[:?]=(?<currentValue>.*)\\s+.+_DIGEST[:?]=(?<currentDigest>sha256:[a-f0-9]+)"
       ]
     },
     {

@@ -55,10 +55,16 @@ func Test_gammaReconciler_Reconcile(t *testing.T) {
 		ClusterConfig: translation.ClusterConfig{
 			IdleTimeoutSeconds: 60,
 		},
+		OriginalIPDetectionConfig: translation.OriginalIPDetectionConfig{
+			UseRemoteAddress: true,
+		},
 	})
 	gatewayAPITranslator := gatewayApiTranslation.NewTranslator(cecTranslator, translation.Config{
 		ServiceConfig: translation.ServiceConfig{
 			ExternalTrafficPolicy: string(corev1.ServiceExternalTrafficPolicyCluster),
+		},
+		OriginalIPDetectionConfig: translation.OriginalIPDetectionConfig{
+			UseRemoteAddress: true,
 		},
 	})
 
@@ -101,9 +107,10 @@ func Test_gammaReconciler_Reconcile(t *testing.T) {
 						Build()
 
 					r := &gammaReconciler{
-						Client:     c,
-						translator: gatewayAPITranslator,
-						logger:     logger,
+						Client:         c,
+						translator:     gatewayAPITranslator,
+						logger:         logger,
+						controllerName: defaultControllerName,
 					}
 
 					// Reconcile all related HTTPRoute objects

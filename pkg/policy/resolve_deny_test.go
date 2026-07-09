@@ -195,8 +195,8 @@ func BenchmarkRegenerateCIDRDenyPolicyRules(b *testing.B) {
 		owner.previousMap = epPolicy.GetMapState()
 		epPolicy.Ready()
 	}
-	ip.detach(true, 0)
-	assert.Equal(b, 117515, owner.previousMap.Len())
+	ip.Detach()
+	assert.Equal(b, 117519, owner.previousMap.Len())
 }
 
 func TestRegenerateCIDRDenyPolicyRules(t *testing.T) {
@@ -210,8 +210,8 @@ func TestRegenerateCIDRDenyPolicyRules(t *testing.T) {
 	epPolicy := ip.DistillPolicy(logger, owner, nil)
 	owner.previousMap = epPolicy.GetMapState()
 	epPolicy.Ready()
-	ip.detach(true, 0)
-	assert.Equal(t, 117515, owner.previousMap.Len())
+	ip.Detach()
+	assert.Equal(t, 117519, owner.previousMap.Len())
 }
 
 func TestL3WithIngressDenyWildcard(t *testing.T) {
@@ -593,11 +593,9 @@ func TestMapStateWithIngressDeny(t *testing.T) {
 			// Although we have calculated deny policies, the overall policy
 			// will still allow egress to world.
 			EgressKey(): allowEgressMapStateEntry,
-			IngressKey().WithIdentity(identity.ReservedIdentityWorld).WithTCPPort(80):     rule1MapStateEntry,
-			IngressKey().WithIdentity(identity.ReservedIdentityWorldIPv4).WithTCPPort(80): rule1MapStateEntry,
-			IngressKey().WithIdentity(identity.ReservedIdentityWorldIPv6).WithTCPPort(80): rule1MapStateEntry,
-			IngressKey().WithIdentity(192).WithTCPPort(80):                                rule1MapStateEntry,
-			IngressKey().WithIdentity(194).WithTCPPort(80):                                rule1MapStateEntry,
+			IngressKey().WithIdentity(identity.ReservedIdentityWorld).WithTCPPort(80): rule1MapStateEntry,
+			IngressKey().WithIdentity(192).WithTCPPort(80):                            rule1MapStateEntry,
+			IngressKey().WithIdentity(194).WithTCPPort(80):                            rule1MapStateEntry,
 		}),
 	}
 
@@ -613,7 +611,7 @@ func TestMapStateWithIngressDeny(t *testing.T) {
 
 	// Verify that cached selector is not found after Detach().
 	// Note that this depends on the other tests NOT using the same selector concurrently!
-	policy.SelectorPolicy.detach(true, 0)
+	policy.SelectorPolicy.Detach()
 	cachedSelectorTest = td.sc.findCachedIdentitySelector(api.NewESFromLabels(lblTest))
 	require.Nil(t, cachedSelectorTest)
 

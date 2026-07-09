@@ -12,10 +12,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/cilium/hive/script"
-	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/spf13/pflag"
 
 	"github.com/cilium/cilium/pkg/bgp/agent"
@@ -29,7 +28,7 @@ func BGPPeersCmd(bgpMgr agent.BGPRouterManager) script.Cmd {
 			Summary: "List BGP peers on Cilium",
 			Flags: func(fs *pflag.FlagSet) {
 				addOutFileFlag(fs)
-				addFormatFlag(fs)
+				addFormatFlagPeers(fs)
 				fs.Bool("no-uptime", false, "Do not show Uptime for testing purpose")
 			},
 			Detail: []string{
@@ -66,6 +65,17 @@ func BGPPeersCmd(bgpMgr agent.BGPRouterManager) script.Cmd {
 					PrintPeerStatesTable(tw, res.Instances, noUptime)
 
 					tw.Flush()
+				case "table-json":
+					builder := strings.Builder{}
+					PrintPeerStatesTable(&builder, res.Instances, noUptime)
+					table := tableJSONfromString(builder.String())
+					out, err := json.MarshalIndent(table, "", "  ")
+					if err != nil {
+						return "", "", fmt.Errorf("json marshal failed: %w", err)
+					}
+					if _, err := w.Write(out); err != nil {
+						return "", "", err
+					}
 				case "json":
 					out, err := json.MarshalIndent(res.Instances, "", "  ")
 					if err != nil {
@@ -86,7 +96,7 @@ func BGPPeersCmd(bgpMgr agent.BGPRouterManager) script.Cmd {
 	)
 }
 
-func PrintPeerStatesTable(tw *tabwriter.Writer, instances []agent.InstancePeerStates, noUptime bool) {
+func PrintPeerStatesTable(w io.Writer, instances []agent.InstancePeerStates, noUptime bool) {
 	type row struct {
 		Instance     string
 		Peer         string
@@ -184,7 +194,7 @@ func PrintPeerStatesTable(tw *tabwriter.Writer, instances []agent.InstancePeerSt
 			}
 		}
 
-		fmt.Fprintf(tw, "%s\n", strings.Join([]string{
+		fmt.Fprintf(w, "%s\n", strings.Join([]string{
 			row.Instance,
 			row.Peer,
 			row.SessionState,
@@ -345,7 +355,7 @@ func formatExtendedNexthopCap(w io.Writer, cap bgp.ParameterCapabilityInterface)
 func formatAddPathCap(w io.Writer, cap bgp.ParameterCapabilityInterface) {
 	fmt.Fprintf(w, "      %s:\n", cap.Code())
 	for _, item := range cap.(*bgp.CapAddPath).Tuples {
-		fmt.Fprintf(w, "        %s: %s\n", item.RouteFamily, item.Mode)
+		fmt.Fprintf(w, "        %s: %s\n", item.Family, item.Mode)
 	}
 }
 
@@ -385,7 +395,7 @@ func parseGracefulRestartCap(g *bgp.CapGracefulRestart) string {
 		grStr += "\n"
 	}
 	for _, t := range g.Tuples {
-		grStr += fmt.Sprintf("        %s", bgp.AfiSafiToRouteFamily(t.AFI, t.SAFI))
+		grStr += fmt.Sprintf("        %s", bgp.NewFamily(t.AFI, t.SAFI))
 		if t.Flags == 0x80 {
 			grStr += ", forward flag set"
 		}
@@ -397,7 +407,7 @@ func parseGracefulRestartCap(g *bgp.CapGracefulRestart) string {
 func parseLongLivedGracefulRestartCap(g *bgp.CapLongLivedGracefulRestart) string {
 	var llgrStr strings.Builder
 	for _, t := range g.Tuples {
-		fmt.Fprintf(&llgrStr, "        %s, restart time %d sec", bgp.AfiSafiToRouteFamily(t.AFI, t.SAFI), t.RestartTime)
+		fmt.Fprintf(&llgrStr, "        %s, restart time %d sec", bgp.NewFamily(t.AFI, t.SAFI), t.RestartTime)
 		if t.Flags == 0x80 {
 			llgrStr.WriteString(", forward flag set")
 		}
@@ -418,7 +428,7 @@ func parseExtendedNexthopCap(e *bgp.CapExtendedNexthop) string {
 		default:
 			nhafi = fmt.Sprintf("%d", t.NexthopAFI)
 		}
-		line := fmt.Sprintf("        nlri: %s, nexthop: %s\n", bgp.AfiSafiToRouteFamily(t.NLRIAFI, uint8(t.NLRISAFI)), nhafi)
+		line := fmt.Sprintf("        nlri: %s, nexthop: %s\n", bgp.NewFamily(t.NLRIAFI, uint8(t.NLRISAFI)), nhafi)
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "")

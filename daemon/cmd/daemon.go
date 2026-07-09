@@ -47,10 +47,6 @@ func initAndValidateDaemonConfig(params daemonConfigParams) error {
 		return fmt.Errorf("IPSec doesnt support strict ingress encryption.")
 	}
 
-	if params.DaemonConfig.EnableEncryptionStrictModeIngress && !params.DaemonConfig.TunnelingEnabled() {
-		return fmt.Errorf("Strict ingress encryption requires tunneling to be enabled.")
-	}
-
 	if params.DaemonConfig.EnableHostFirewall {
 		if params.IPSecConfig.Enabled() {
 			return fmt.Errorf("IPSec cannot be used with the host firewall.")
@@ -323,11 +319,12 @@ func unloadDNSPolicies(params daemonParams) {
 			"Triggering policy recalculation to remove DNS rules due to option",
 			logfields.Option, option.DNSPolicyUnloadOnShutdown,
 		)
-		params.Policy.BumpRevision()
 		regenerationMetadata := &regeneration.ExternalRegenerationMetadata{
 			Reason:            regeneration.ReasonDaemonConfigUpdate,
 			Message:           "unloading DNS rules on graceful shutdown",
 			RegenerationLevel: regeneration.RegenerateWithoutDatapath,
+
+			PolicyRevisionToWaitFor: params.Policy.BumpRevision(),
 		}
 		wg := params.EndpointManager.RegenerateAllEndpoints(regenerationMetadata)
 		wg.Wait()

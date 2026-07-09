@@ -232,12 +232,16 @@ func (c *cecProcessor) processCEC(wtxn statedb.WriteTxn, cecName CECName) *state
 	ws := statedb.NewWatchSet()
 	ws.Add(watch)
 
-	var redirects part.Map[loadbalancer.ServiceName, *loadbalancer.ProxyRedirect]
+	var redirects part.Map[loadbalancer.ServiceName, loadbalancer.ProxyRedirects]
 	for _, l := range cec.Spec.Services {
-		redirects = redirects.Set(l.ServiceName(), getProxyRedirect(cec, l))
+		pr := getProxyRedirect(cec, l)
+		if pr != nil {
+			existing, _ := redirects.Get(l.ServiceName())
+			redirects = redirects.Set(l.ServiceName(), append(existing, *pr))
+		}
 
 		// Watch changes for each of the referenced services to make sure we reprocess the CEC
-		// and set the ProxyRedirect in cases where CEC was created before the Service.
+		// and set the ProxyRedirects in cases where CEC was created before the Service.
 		_, _, watchSvc, _ := c.writer.Services().GetWatch(wtxn, loadbalancer.ServiceByName(l.ServiceName()))
 		ws.Add(watchSvc)
 	}
@@ -353,7 +357,7 @@ func (bs *backendProcessor) process(wtxn statedb.WriteTxn, closedWatches []<-cha
 		}
 
 		prevEndpoints := res.Resources.Endpoints
-		var newEndpoints []*envoy_config_endpoint.ClusterLoadAssignment
+		var newEndpoints map[string]*envoy_config_endpoint.ClusterLoadAssignment
 
 		// Look up the referenced service for the port name to port number mappings.
 		svc, _, watchSvc, found := bs.writer.Services().GetWatch(wtxn, loadbalancer.ServiceByName(res.ClusterServiceName()))
@@ -362,11 +366,14 @@ func (bs *backendProcessor) process(wtxn statedb.WriteTxn, closedWatches []<-cha
 			// Look up associated backends and update the load assignments.
 			bes, watchBes := bs.writer.BackendsForService(wtxn, svc.Name)
 			ws.Add(watchBes)
-			newEndpoints = computeLoadAssignments(
+			newEndpoints = make(map[string]*envoy_config_endpoint.ClusterLoadAssignment)
+			for _, assignment := range computeLoadAssignments(
 				svc.Name,
 				res.ClusterReferences,
 				svc.PortNames,
-				bs.writer.SelectBackends(wtxn, bes, svc, nil))
+				bs.writer.SelectBackends(wtxn, bes, svc, nil)) {
+				newEndpoints[assignment.ClusterName] = assignment
+			}
 		} else {
 			// No service found (yet) and thus there are no endpoints.
 			newEndpoints = nil
@@ -375,7 +382,7 @@ func (bs *backendProcessor) process(wtxn statedb.WriteTxn, closedWatches []<-cha
 		claEqual := func(a, b *envoy_config_endpoint.ClusterLoadAssignment) bool {
 			return proto.Equal(a, b)
 		}
-		endpointsEqual := slices.EqualFunc(prevEndpoints, newEndpoints, claEqual)
+		endpointsEqual := maps.EqualFunc(prevEndpoints, newEndpoints, claEqual)
 
 		if !endpointsEqual || (res.Status.Kind != reconciler.StatusKindDone && res.Status.Kind != reconciler.StatusKindPending) {
 			res = res.Clone()

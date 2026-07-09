@@ -14,6 +14,7 @@
 #include "lb.h"
 #include "common.h"
 #include "drop.h"
+#include "drop_reasons.h"
 #include "overloadable.h"
 #include "egress_gateway.h"
 #include "eps.h"
@@ -30,8 +31,7 @@
 
 DECLARE_CONFIG(bool, enable_no_service_endpoints_routable,
 	       "Enable routes when service has 0 endpoints")
-DECLARE_CONFIG(__u16, device_mtu, "MTU of the device the bpf program is attached to (default: MTU set in node_config.h by agent)")
-ASSIGN_CONFIG(__u16, device_mtu, MTU)
+DECLARE_CONFIG(__u16, device_mtu, "MTU of the device the bpf program is attached to")
 
 /* Evaluate the input values for detecting compilation errors.
  * Just blindly substituting this macro with the CTX_ACT_OK
@@ -232,9 +232,15 @@ static __always_inline bool nodeport_uses_dsr6(const struct lb6_service *svc)
 	return nodeport_uses_dsr(svc->flags2 & SVC_FLAG_FWD_MODE_DSR);
 }
 
-static __always_inline bool nodeport_skip_xlate6(const struct lb6_service *svc)
+static __always_inline bool nodeport_skip_xlate6(const struct lb6_service *svc,
+						 bool backend_local)
 {
-	bool skip_xlate = DSR_ENCAP_MODE == DSR_ENCAP_IPIP;
+	/* Under DSR with IPIP dispatch the inner packet is shipped to the
+	 * remote backend unchanged, so skip the DNAT. When the backend is
+	 * local though (LB node with local backend, or backend node after
+	 * cilium_ipip decap) we must DNAT to reach the Pod.
+	 */
+	bool skip_xlate = (DSR_ENCAP_MODE == DSR_ENCAP_IPIP) && !backend_local;
 
 	if (skip_xlate)
 		skip_xlate = nodeport_uses_dsr6(svc);
@@ -410,7 +416,7 @@ static __always_inline int encap_geneve_dsr_opt6(struct __ctx_buff *ctx,
 	__u16 encap_len = sizeof(struct ipv6hdr) + sizeof(struct udphdr) +
 		sizeof(struct genevehdr) + ETH_HLEN;
 	__u16 payload_len = bpf_ntohs(ip6->payload_len) + sizeof(*ip6);
-	fraginfo_t fraginfo;
+	fraginfo_t fraginfo = 0;
 	__u16 total_len = 0;
 	__be16 src_port;
 	int l4_off, ret;
@@ -951,7 +957,7 @@ nodeport_rev_dnat_ipv6(struct __ctx_buff *ctx, enum ct_dir dir,
 	__u32 src_sec_identity __maybe_unused = SECLABEL;
 	__be16 src_port __maybe_unused = 0;
 	bool allow_neigh_map = true;
-	fraginfo_t fraginfo;
+	fraginfo_t fraginfo = 0;
 	int ifindex = 0;
 	__u32 monitor = 0;
 
@@ -1202,17 +1208,14 @@ drop_err:
 	return send_drop_notify_error_ext(ctx, src_id, ret, ext_err, METRIC_INGRESS);
 }
 
+DEFINE_AUX(struct bpf_fib_lookup_padded, nodeport_fib_params);
+
 __declare_tail(CILIUM_CALL_IPV6_NODEPORT_NAT_EGRESS)
 static __always_inline
 int tail_nodeport_nat_egress_ipv6(struct __ctx_buff *ctx)
 {
 	const bool nat_46x64 = nat46x64_cb_xlate(ctx);
-	struct bpf_fib_lookup_padded fib_params = {
-		.l = {
-			.family		= AF_INET6,
-			.ifindex	= ctx_get_ifindex(ctx),
-		},
-	};
+	struct bpf_fib_lookup_padded *fib_params = AUX(nodeport_fib_params);
 	struct ipv6_nat_target target = {
 		.min_port = NODEPORT_PORT_MIN_NAT,
 		.max_port = NODEPORT_PORT_MAX_NAT,
@@ -1225,9 +1228,9 @@ int tail_nodeport_nat_egress_ipv6(struct __ctx_buff *ctx)
 	};
 	struct ipv6_nat_entry *state = NULL;
 	int ret, l4_off, oif = 0;
+	fraginfo_t fraginfo = 0;
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
-	fraginfo_t fraginfo;
 	__s8 ext_err = 0;
 #ifdef TUNNEL_MODE
 	const struct remote_endpoint_info *info;
@@ -1338,16 +1341,19 @@ fib_ipv4:
 			ret = DROP_INVALID;
 			goto drop_err;
 		}
-		fib_params.l.ipv4_src = ip4->saddr;
-		fib_params.l.ipv4_dst = ip4->daddr;
-		fib_params.l.family = AF_INET;
+		fib_params->l.ipv4_src = ip4->saddr;
+		fib_params->l.ipv4_dst = ip4->daddr;
+		fib_params->l.family = AF_INET;
 	} else {
-		ipv6_addr_copy((union v6addr *)&fib_params.l.ipv6_src,
+		ipv6_addr_copy((union v6addr *)&fib_params->l.ipv6_src,
 			       (union v6addr *)&ip6->saddr);
-		ipv6_addr_copy((union v6addr *)&fib_params.l.ipv6_dst,
+		ipv6_addr_copy((union v6addr *)&fib_params->l.ipv6_dst,
 			       (union v6addr *)&ip6->daddr);
+		fib_params->l.family = AF_INET6;
 	}
-	ret = fib_redirect(ctx, true, &fib_params, false, &ext_err, &oif);
+
+	fib_params->l.ifindex = ctx_get_ifindex(ctx);
+	ret = fib_redirect(ctx, true, fib_params, false, &ext_err, &oif);
 	if (fib_ok(ret)) {
 		return ret;
 	}
@@ -1370,6 +1376,8 @@ static __always_inline int nodeport_svc_lb6(struct __ctx_buff *ctx,
 {
 	struct ct_state ct_state_svc = {};
 	const struct lb6_backend *backend;
+	const struct lb6_backend *forced_be_p __maybe_unused = NULL;
+	struct lb6_backend forced_be __maybe_unused = {};
 	bool backend_local;
 	__u32 monitor = 0;
 	int ret;
@@ -1417,8 +1425,21 @@ static __always_inline int nodeport_svc_lb6(struct __ctx_buff *ctx,
 		return CTX_ACT_OK;
 	}
 #endif
+	if (CONFIG(enable_ipip_termination)) {
+		union v6addr forced_addr = {};
+		const union v6addr zero = {};
+
+		ctx_load_meta_ipv6(ctx, &forced_addr, CB_FORCED_BACKEND_V6_1);
+		ctx_store_meta_ipv6(ctx, CB_FORCED_BACKEND_V6_1, &zero);
+		if (forced_addr.d1 || forced_addr.d2) {
+			ipv6_addr_copy(&forced_be.address, &forced_addr);
+			forced_be.flags = BE_STATE_ACTIVE;
+			forced_be_p = &forced_be;
+		}
+	}
 	ret = lb6_local(get_ct_map6(tuple), ctx, fraginfo, l4_off,
-			key, tuple, svc, &ct_state_svc, &backend, ext_err);
+			key, tuple, svc, &ct_state_svc, &backend,
+			ext_err, forced_be_p);
 	if (IS_ERR(ret)) {
 		if (ret == DROP_NO_SERVICE) {
 			if (!CONFIG(enable_no_service_endpoints_routable))
@@ -1445,7 +1466,7 @@ static __always_inline int nodeport_svc_lb6(struct __ctx_buff *ctx,
 		return CTX_ACT_OK;
 	}
 
-	if (!nodeport_skip_xlate6(svc)) {
+	if (!nodeport_skip_xlate6(svc, backend_local)) {
 		ret = lb6_dnat_request(ctx, backend, l3_off, fraginfo,
 				       l4_off, tuple, false);
 		if (IS_ERR(ret))
@@ -1532,11 +1553,11 @@ static __always_inline int nodeport_lb6(struct __ctx_buff *ctx,
 					__s8 *ext_err,
 					bool __maybe_unused *dsr)
 {
-	fraginfo_t fraginfo;
 	bool is_svc_proto __maybe_unused = true;
 	int ret, l3_off = ETH_HLEN, l4_off;
 	struct ipv6_ct_tuple tuple __align_stack_8 = {};
 	const struct lb6_service *svc;
+	fraginfo_t fraginfo = 0;
 	struct lb6_key key = {};
 
 	tuple.nexthdr = ip6->nexthdr;
@@ -1618,9 +1639,15 @@ static __always_inline bool nodeport_uses_dsr4(const struct lb4_service *svc)
 	return nodeport_uses_dsr(svc->flags2 & SVC_FLAG_FWD_MODE_DSR);
 }
 
-static __always_inline bool nodeport_skip_xlate4(const struct lb4_service *svc)
+static __always_inline bool nodeport_skip_xlate4(const struct lb4_service *svc,
+						 bool backend_local)
 {
-	bool skip_xlate = DSR_ENCAP_MODE == DSR_ENCAP_IPIP;
+	/* Under DSR with IPIP dispatch the inner packet is shipped to the
+	 * remote backend unchanged, so skip the DNAT. When the backend is
+	 * local though (LB node with local backend, or backend node after
+	 * cilium_ipip decap) we must DNAT to reach the Pod.
+	 */
+	bool skip_xlate = (DSR_ENCAP_MODE == DSR_ENCAP_IPIP) && !backend_local;
 
 	if (skip_xlate)
 		skip_xlate = nodeport_uses_dsr4(svc);
@@ -2751,9 +2778,21 @@ static __always_inline int nodeport_svc_lb4(struct __ctx_buff *ctx,
 						  ext_err);
 		}
 	} else {
+		const struct lb4_backend *tmp = NULL;
+		struct lb4_backend forced_be __maybe_unused = {};
+
+		if (CONFIG(enable_ipip_termination)) {
+			__be32 forced_addr = ctx_load_and_clear_meta(ctx,
+							CB_FORCED_BACKEND_V4);
+			if (forced_addr) {
+				forced_be.address = forced_addr;
+				forced_be.flags = BE_STATE_ACTIVE;
+				tmp = &forced_be;
+			}
+		}
 		ret = lb4_local(get_ct_map4(tuple), ctx, fraginfo, l4_off,
 				key, tuple, svc, &ct_state_svc, &backend,
-				ext_err);
+				ext_err, tmp);
 		if (IS_ERR(ret)) {
 			if (ret == DROP_NO_SERVICE) {
 				if (!CONFIG(enable_no_service_endpoints_routable))
@@ -2786,7 +2825,7 @@ static __always_inline int nodeport_svc_lb4(struct __ctx_buff *ctx,
 		cluster_id = backend->cluster_id;
 #endif
 
-		if (!nodeport_skip_xlate4(svc))
+		if (!nodeport_skip_xlate4(svc, backend_local))
 			ret = lb4_dnat_request(ctx, backend, l3_off, fraginfo,
 					       l4_off, tuple, false);
 	}

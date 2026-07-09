@@ -27,10 +27,13 @@ DeleteIPAMIP              -
 DeletePrefilter           -
 GetBGPPeers               Retrieves current operational state of BGP peers created by
                           Cilium BGP virtual router. This includes session state,
-                          uptime, information per address family, etc.
-GetBGPRoutePolicies       Retrieves route policies from BGP Control Plane.
+                          uptime, information per address family, etc. Deprecated:
+                          This will be removed in the future.
+GetBGPRoutePolicies       Retrieves route policies from BGP Control Plane. Deprecated:
+                          This will be removed in the future.
 GetBGPRoutes              Retrieves routes from BGP Control Plane RIB filtered by
-                          parameters you specify
+                          parameters you specify. Deprecated: This will be removed in
+                          the future.
 GetCgroupDumpMetadata     -
 GetClusterNodes           -
 GetConfig                 Returns the configuration of the Cilium daemon.
@@ -52,8 +55,8 @@ GetFqdnCacheID            Retrieves the list of DNS lookups intercepted from the
 GetFqdnNames              Retrieves the list of DNS-related fields (names to poll,
                           selectors and their corresponding regexes).
 GetHealthz                Returns health and status information of the Cilium daemon
-                          and related components such as the local container runtime,
-                          connected datastore, Kubernetes integration and Hubble.
+                          and related components such as the connected datastore,
+                          Kubernetes integration and Hubble.
 GetIP                     Retrieves a list of IPs with known associated information
                           such as their identities, host addresses, Kubernetes pod
                           names, etc. The list can optionally filtered by a CIDR IP

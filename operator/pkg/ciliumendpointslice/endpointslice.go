@@ -183,6 +183,15 @@ func (c *DefaultController) Start(ctx cell.HookContext) error {
 			c.worker()
 			return nil
 		}),
+		// Add the shutdown job last so it stops first.
+		job.OneShot("shutdown", func(ctx context.Context, health cell.Health) error {
+			<-ctx.Done()
+			c.wp.Close()
+			c.fastQueue.ShutDown()
+			c.standardQueue.ShutDown()
+			c.contextCancel()
+			return nil
+		}),
 	)
 
 	return nil
@@ -231,6 +240,14 @@ func (c *SlimController) Start(ctx cell.HookContext) error {
 			c.worker()
 			return nil
 		}),
+		// Add the shutdown job last so it stops first.
+		job.OneShot("shutdown", func(ctx context.Context, health cell.Health) error {
+			<-ctx.Done()
+			c.fastQueue.ShutDown()
+			c.standardQueue.ShutDown()
+			c.contextCancel()
+			return nil
+		}),
 	)
 	// Start the work pools processing CEP events only after syncing CES in local cache.
 	// c.wp = workerpool.New(4)
@@ -251,17 +268,10 @@ func (c *SlimController) Start(ctx cell.HookContext) error {
 }
 
 func (c *DefaultController) Stop(ctx cell.HookContext) error {
-	c.wp.Close()
-	c.fastQueue.ShutDown()
-	c.standardQueue.ShutDown()
-	c.contextCancel()
 	return nil
 }
 
 func (c *SlimController) Stop(ctx cell.HookContext) error {
-	c.fastQueue.ShutDown()
-	c.standardQueue.ShutDown()
-	c.contextCancel()
 	return nil
 }
 
@@ -517,7 +527,7 @@ func (c *SlimController) syncCESsInLocalCache(ctx context.Context) error {
 			nodeObj, err := cnodeStore.ByIndex(op_k8s.CiliumNodeIPIndex, cep.Networking.NodeIP)
 			// If the CiliumNode is not found (e.g., deleted during operator restart), we skip restoring the state of this CEP on startup.
 			// We will get the CEP & CiliumNode add events through the resource stores and update the latest state in the local cache.
-			if err != nil {
+			if err != nil || len(nodeObj) == 0 {
 				c.logger.DebugContext(ctx, "Error getting CiliumNode by IP",
 					logfields.Error, err)
 				continue

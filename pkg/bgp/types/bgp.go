@@ -5,12 +5,14 @@ package types
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"strings"
 	"time"
 
-	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/cilium/cilium/api/v1/models"
 )
@@ -53,15 +55,27 @@ type StateNotificationCh chan struct{}
 // but only contains minimal fields required for Cilium usecases.
 type Path struct {
 	// read/write
-	NLRI           bgp.AddrPrefixInterface
+	NLRI           bgp.NLRI
 	PathAttributes []bgp.PathAttributeInterface
-	Family         Family // can be empty, in which case it will be inferred from NLRI
+	Family         Family
 
 	// readonly
-	AgeNanoseconds int64 // time duration in nanoseconds since the Path was created
-	Best           bool
-	UUID           []byte // path identifier in underlying implementation
-	SourceASN      uint32
+	CreatedAt time.Time // time when the Path was created
+	Best      bool
+	UUID      []byte // path identifier in underlying implementation
+	SourceASN uint32
+}
+
+// Age returns the elapsed duration since the Path was created.
+func (p *Path) Age() time.Duration {
+	if p.CreatedAt.IsZero() {
+		return 0
+	}
+	age := time.Since(p.CreatedAt)
+	if age < 0 {
+		return 0
+	}
+	return age
 }
 
 // Neighbor is an object representing a single BGP neighbor. It is an analogue
@@ -278,6 +292,20 @@ func (t RoutePolicyMatchType) MarshalYAML() (any, error) {
 	return t.String(), nil
 }
 
+func (t *RoutePolicyMatchType) UnmarshalYAML(value *yaml.Node) error {
+	switch strings.ToLower(value.Value) {
+	case "any":
+		*t = RoutePolicyMatchAny
+	case "all":
+		*t = RoutePolicyMatchAll
+	case "invert":
+		*t = RoutePolicyMatchInvert
+	default:
+		return fmt.Errorf("unknown route policy match type %q", value.Value)
+	}
+	return nil
+}
+
 // RoutePolicyNeighborMatch matches BGP neighbor IP address with the provided IPs using the provided match logic type.
 //
 // +deepequal-gen=true
@@ -423,6 +451,20 @@ func (a RoutePolicyAction) MarshalYAML() (any, error) {
 	return a.String(), nil
 }
 
+func (a *RoutePolicyAction) UnmarshalYAML(value *yaml.Node) error {
+	switch strings.ToLower(value.Value) {
+	case "none":
+		*a = RoutePolicyActionNone
+	case "accept":
+		*a = RoutePolicyActionAccept
+	case "reject":
+		*a = RoutePolicyActionReject
+	default:
+		return fmt.Errorf("unknown route policy action %q", value.Value)
+	}
+	return nil
+}
+
 // RoutePolicyActions define policy actions taken on route matched by a routing policy.
 //
 // +deepequal-gen=true
@@ -458,6 +500,8 @@ type RoutePolicyActionNextHop struct {
 //
 // +deepequal-gen=true
 type RoutePolicyStatement struct {
+	// Name of the statement. Should be unique within its route policy. Will be auto-generated if not set.
+	Name string
 	// Conditions of the statement. If ALL of them match a route, the Actions are taken on the route.
 	Conditions RoutePolicyConditions
 	// Actions define actions taken on a matched route.
@@ -491,6 +535,18 @@ func (t RoutePolicyType) MarshalJSON() ([]byte, error) {
 
 func (t RoutePolicyType) MarshalYAML() (any, error) {
 	return t.String(), nil
+}
+
+func (t *RoutePolicyType) UnmarshalYAML(value *yaml.Node) error {
+	switch strings.ToLower(value.Value) {
+	case "export":
+		*t = RoutePolicyTypeExport
+	case "import":
+		*t = RoutePolicyTypeImport
+	default:
+		return fmt.Errorf("unknown route policy type %q", value.Value)
+	}
+	return nil
 }
 
 // RoutePolicy represents a BGP routing policy, also called "route map" in some BGP implementations.

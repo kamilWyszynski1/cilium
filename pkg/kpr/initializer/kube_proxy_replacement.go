@@ -98,8 +98,9 @@ func (r *kprInitializer) InitKubeProxyReplacementOptions() error {
 		}
 
 		dsrIPIP := r.lbConfig.LoadBalancerUsesDSR() && r.lbConfig.DSRDispatch == loadbalancer.DSRDispatchIPIP
-		if dsrIPIP && option.Config.NodePortAcceleration == option.NodePortAccelerationDisabled {
+		if dsrIPIP {
 			option.Config.UnsafeDaemonConfigOption.EnableIPIPDevices = true
+			option.Config.EnableIPIPTermination = true
 		}
 
 		if (option.Config.LoadBalancerRSSv4CIDR != "" || option.Config.LoadBalancerRSSv6CIDR != "") && !dsrIPIP {
@@ -407,8 +408,8 @@ func checkNodePortAndEphemeralPortRanges(lbConfig loadbalancer.Config, sysctl sy
 			break
 		}
 		ports := strings.Split(portRange, "-")
-		if len(ports) == 0 {
-			return fmt.Errorf("Invalid reserved ports range")
+		if len(ports) != 1 && len(ports) != 2 {
+			return fmt.Errorf("Invalid reserved ports range %q", portRange)
 		}
 		from, err := strconv.Atoi(ports[0])
 		if err != nil {
@@ -418,6 +419,9 @@ func checkNodePortAndEphemeralPortRanges(lbConfig loadbalancer.Config, sysctl sy
 		if len(ports) == 2 {
 			if to, err = strconv.Atoi(ports[1]); err != nil {
 				return fmt.Errorf("Unable to parse reserved port %q", ports[1])
+			}
+			if from > to {
+				return fmt.Errorf("Invalid reserved ports range %q: start must be less than or equal to end", portRange)
 			}
 		}
 

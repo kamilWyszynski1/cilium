@@ -7,6 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
+	"log/slog"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -16,17 +19,22 @@ import (
 	"github.com/stretchr/testify/require"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8sTypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/annotation"
+	fakebandwidth "github.com/cilium/cilium/pkg/datapath/linux/bandwidth/fake"
 	fakeipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/fake"
 	fakeendpoint "github.com/cilium/cilium/pkg/endpoint/fake"
 	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/eventqueue"
+	fqdnrestore "github.com/cilium/cilium/pkg/fqdn/restore"
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/ipcache"
+	"github.com/cilium/cilium/pkg/k8s"
 	ciliumio "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
@@ -40,10 +48,13 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/policy/compute"
+	proxyendpoint "github.com/cilium/cilium/pkg/proxy/endpoint"
 	"github.com/cilium/cilium/pkg/testutils"
+	testcompute "github.com/cilium/cilium/pkg/testutils/compute"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
-	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 	testpolicy "github.com/cilium/cilium/pkg/testutils/policy"
+	ciliumTypes "github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
 	fakewireguard "github.com/cilium/cilium/pkg/wireguard/fake"
 )
@@ -51,6 +62,7 @@ import (
 type EndpointSuite struct {
 	orchestrator endpoint.Orchestrator
 	repo         policy.PolicyRepository
+	fetcher      compute.PolicyRecomputer
 	mgr          *cache.CachingIdentityAllocator
 }
 
@@ -58,11 +70,14 @@ func setupEndpointSuite(tb testing.TB) *EndpointSuite {
 	testutils.IntegrationTest(tb)
 	logger := hivetest.Logger(tb)
 
+	idmgr := identitymanager.NewIDManager(logger)
+	repo := policy.NewPolicyRepository(logger, nil, nil, nil, idmgr, testpolicy.NewPolicyMetricsNoop())
 	s := &EndpointSuite{
 		orchestrator: &fakeendpoint.FakeOrchestrator{},
-		repo:         policy.NewPolicyRepository(logger, nil, nil, nil, nil, testpolicy.NewPolicyMetricsNoop()),
+		repo:         repo,
 		mgr:          cache.NewCachingIdentityAllocator(logger, &testidentity.IdentityAllocatorOwnerMock{}, cache.NewTestAllocatorConfig()),
 	}
+	s.fetcher = testcompute.InstantiateCellForTesting(tb, logger, "endpoint", "setupEndpointSuite", repo, idmgr)
 
 	// GetConfig the default labels prefix filter
 	err := labelsfilter.ParseLabelPrefixCfg(logger, nil, nil, "")
@@ -187,36 +202,43 @@ func TestEndpointStatus(t *testing.T) {
 	require.Equal(t, "OK", eps.String())
 }
 
-func createEndpointParams(tb testing.TB, o endpoint.Orchestrator, r policy.PolicyRepository) EndpointParams {
+func createEndpointParams(tb testing.TB, o endpoint.Orchestrator, r policy.PolicyRepository, fetcher compute.PolicyRecomputer) EndpointParams {
+	logger := hivetest.Logger(tb)
 	return EndpointParams{
-		Logger:           hivetest.Logger(tb),
+		Logger:           logger,
 		EPBuildQueue:     &MockEndpointBuildQueue{},
 		Orchestrator:     o,
 		PolicyRepo:       r,
-		IdentityManager:  identitymanager.NewIDManager(hivetest.Logger(tb)),
-		NamedPortsGetter: testipcache.NewMockIPCache(),
+		PolicyFetcher:    fetcher,
+		IdentityManager:  identitymanager.NewIDManager(logger),
+		BandwidthManager: &fakebandwidth.Manager{},
 		IPSecConfig:      fakeipsec.Config{},
 		WgConfig:         fakewireguard.Config{},
 		CTMapGC:          ctmap.NewFakeGCRunner(),
 		Allocator:        testidentity.NewMockIdentityAllocator(nil),
 		LocalNodeStore:   node.NewTestLocalNodeStore(node.LocalNode{}),
+		KVStoreSynchronizer: ipcache.NewIPIdentitySynchronizer(
+			logger,
+			kvstore.SetupDummy(tb, kvstore.DisabledBackendName),
+		),
 	}
 }
 
 func createTestEndpointParams(tb testing.TB) EndpointParams {
 	s := setupEndpointSuite(tb)
-	return createEndpointParams(tb, s.orchestrator, s.repo)
+	return createEndpointParams(tb, s.orchestrator, s.repo, s.fetcher)
 }
 
 func TestEndpointDatapathOptions(t *testing.T) {
-	m := &models.EndpointChangeRequest{
+	s := setupEndpointSuite(t)
+
+	p := createEndpointParams(t, s.orchestrator, s.repo, s.fetcher)
+	p.Allocator = s.mgr
+	e, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, &models.EndpointChangeRequest{
 		DatapathConfiguration: &models.EndpointDatapathConfiguration{
 			DisableSipVerification: true,
 		},
-	}
-
-	p := createTestEndpointParams(t)
-	e, err := NewEndpointFromChangeModel(p, nil, nil, m, nil)
+	}, nil)
 	require.NoError(t, err)
 	require.Equal(t, option.OptionDisabled, e.Options.GetValue(option.SourceIPVerification))
 }
@@ -365,16 +387,15 @@ func TestApplySourceIPVerificationFromAnnotation(t *testing.T) {
 			// Create a minimal endpoint for testing
 			model := newTestEndpointModel(100, StateWaitingForIdentity)
 			p := EndpointParams{
-				Logger:           logger,
-				EPBuildQueue:     &MockEndpointBuildQueue{},
-				Orchestrator:     s.orchestrator,
-				IdentityManager:  identitymanager.NewIDManager(logger),
-				PolicyRepo:       s.repo,
-				NamedPortsGetter: testipcache.NewMockIPCache(),
-				Allocator:        testidentity.NewMockIdentityAllocator(nil),
-				CTMapGC:          ctmap.NewFakeGCRunner(),
-				WgConfig:         fakewireguard.Config{},
-				IPSecConfig:      fakeipsec.Config{},
+				Logger:          logger,
+				EPBuildQueue:    &MockEndpointBuildQueue{},
+				Orchestrator:    s.orchestrator,
+				IdentityManager: identitymanager.NewIDManager(logger),
+				PolicyRepo:      s.repo,
+				Allocator:       testidentity.NewMockIdentityAllocator(nil),
+				CTMapGC:         ctmap.NewFakeGCRunner(),
+				WgConfig:        fakewireguard.Config{},
+				IPSecConfig:     fakeipsec.Config{},
 			}
 			ep, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, model, nil)
 			require.NoError(t, err)
@@ -416,16 +437,15 @@ func TestApplySourceIPVerificationResetsToGlobalDefault(t *testing.T) {
 	// Create endpoint
 	model := newTestEndpointModel(100, StateWaitingForIdentity)
 	p := EndpointParams{
-		Logger:           logger,
-		EPBuildQueue:     &MockEndpointBuildQueue{},
-		Orchestrator:     s.orchestrator,
-		IdentityManager:  identitymanager.NewIDManager(logger),
-		PolicyRepo:       s.repo,
-		NamedPortsGetter: testipcache.NewMockIPCache(),
-		Allocator:        testidentity.NewMockIdentityAllocator(nil),
-		CTMapGC:          ctmap.NewFakeGCRunner(),
-		WgConfig:         fakewireguard.Config{},
-		IPSecConfig:      fakeipsec.Config{},
+		Logger:          logger,
+		EPBuildQueue:    &MockEndpointBuildQueue{},
+		Orchestrator:    s.orchestrator,
+		IdentityManager: identitymanager.NewIDManager(logger),
+		PolicyRepo:      s.repo,
+		Allocator:       testidentity.NewMockIdentityAllocator(nil),
+		CTMapGC:         ctmap.NewFakeGCRunner(),
+		WgConfig:        fakewireguard.Config{},
+		IPSecConfig:     fakeipsec.Config{},
 	}
 	ep, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
@@ -475,10 +495,11 @@ func TestApplySourceIPVerificationResetsToGlobalDefault(t *testing.T) {
 }
 
 func TestEndpointUpdateLabels(t *testing.T) {
-	model := newTestEndpointModel(100, StateWaitingForIdentity)
-	p := createTestEndpointParams(t)
+	s := setupEndpointSuite(t)
 
-	e, err := NewEndpointFromChangeModel(p, nil, nil, model, nil)
+	model := newTestEndpointModel(100, StateWaitingForIdentity)
+	p := createEndpointParams(t, s.orchestrator, s.repo, s.fetcher)
+	e, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
 
 	e.Start(uint16(model.ID))
@@ -520,10 +541,238 @@ func TestEndpointUpdateLabels(t *testing.T) {
 	require.Equal(t, "nginx:foo2=zop2;", string(e.labels.OrchestrationInfo.SortedList()))
 }
 
+func TestInitialNamedPortsIdentityLabel(t *testing.T) {
+	newEndpoint := func(t *testing.T, securityIdentity *identity.Identity, current labels.Labels) *Endpoint {
+		model := newTestEndpointModel(100, StateWaitingForIdentity)
+		logger := hivetest.Logger(t)
+		idmgr := identitymanager.NewIDManager(logger)
+		repo := policy.NewPolicyRepository(logger, nil, nil, nil, idmgr, testpolicy.NewPolicyMetricsNoop())
+		fetcher := testcompute.InstantiateCellForTesting(t, logger, "endpoint", "TestInitialNamedPortsIdentityLabel", repo, idmgr)
+		p := createEndpointParams(
+			t,
+			&fakeendpoint.FakeOrchestrator{},
+			repo,
+			fetcher,
+		)
+
+		e, err := NewEndpointFromChangeModel(p, nil, nil, model, nil)
+		require.NoError(t, err)
+		e.SecurityIdentity = securityIdentity
+
+		e.Start(uint16(model.ID))
+		t.Cleanup(e.Stop)
+
+		if current != nil {
+			rev := e.replaceIdentityLabels(labels.LabelSourceAny, current)
+			require.NotZero(t, rev)
+		}
+		return e
+	}
+
+	namedPorts := ciliumTypes.NamedPortMap{
+		"https": {Proto: u8proto.TCP, Port: 443},
+		"http":  {Proto: u8proto.TCP, Port: 80},
+	}
+	incoming := func() labels.Labels {
+		return labels.Map2Labels(map[string]string{
+			"app": "backend",
+		}, labels.LabelSourceK8s)
+	}
+	assertNamedPortsLabels := func(t *testing.T, e *Endpoint, values ...string) {
+		t.Helper()
+
+		expected := map[string]string{}
+		identityLabels := e.labels.IdentityLabels()
+		for i, value := range values {
+			key := ciliumio.NamedPortsIdentityLabelNameForIndex(i)
+			expected[key] = value
+
+			label, ok := identityLabels[key]
+			require.True(t, ok)
+			require.Equal(t, value, label.Value)
+			require.Equal(t, labels.LabelSourceGenerated, label.Source)
+		}
+		for key := range identityLabels {
+			if ciliumio.IsNamedPortsIdentityLabelName(key) {
+				require.Contains(t, expected, key)
+			}
+		}
+	}
+	assertNoNamedPortsLabels := func(t *testing.T, lbls labels.Labels) {
+		t.Helper()
+
+		for key := range lbls {
+			require.False(t, ciliumio.IsNamedPortsIdentityLabelName(key), key)
+		}
+	}
+	resolveMetadata := func(namedPorts ciliumTypes.NamedPortMap) MetadataResolverCB {
+		return func(ns, podName, uid string, newPod bool) (*corev1.Pod, *K8sMetadata, error) {
+			lbls := incoming()
+			if newPod {
+				for _, lbl := range k8s.NamedPortsIdentityLabels(namedPorts) {
+					lbls[lbl.Key] = lbl
+				}
+			}
+			return &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: ns,
+						Name:      podName,
+						UID:       k8sTypes.UID(uid),
+					},
+				}, &K8sMetadata{
+					IdentityLabels: lbls,
+					NamedPorts:     namedPorts,
+				}, nil
+		}
+	}
+	resolvePodMetadata := func(t *testing.T, e *Endpoint, restored bool, namedPorts ciliumTypes.NamedPortMap) {
+		e.K8sNamespace, e.K8sPodName, e.K8sUID = "default", "pod", "uid"
+
+		_, err := e.metadataResolver(t.Context(), restored, false, nil, resolveMetadata(namedPorts))
+		require.NoError(t, err)
+	}
+
+	t.Run("new endpoint gains generated label from metadata", func(t *testing.T) {
+		e := newEndpoint(t, nil, nil)
+
+		resolvePodMetadata(t, e, false, namedPorts)
+
+		assertNamedPortsLabels(t, e, "http.TCP.80_https.TCP.443")
+	})
+
+	t.Run("new endpoint gains split generated labels from metadata", func(t *testing.T) {
+		e := newEndpoint(t, nil, nil)
+
+		resolvePodMetadata(t, e, false, ciliumTypes.NamedPortMap{
+			"port-a": {Port: 8000, Proto: u8proto.TCP},
+			"port-b": {Port: 8001, Proto: u8proto.TCP},
+			"port-c": {Port: 8002, Proto: u8proto.TCP},
+			"port-d": {Port: 8003, Proto: u8proto.TCP},
+			"port-e": {Port: 8004, Proto: u8proto.TCP},
+		})
+
+		assertNamedPortsLabels(t, e,
+			"port-a.TCP.8000_port-b.TCP.8001_port-c.TCP.8002_port-d.TCP.8003",
+			"port-e.TCP.8004",
+		)
+	})
+
+	t.Run("new endpoint without named ports does not gain generated label", func(t *testing.T) {
+		e := newEndpoint(t, nil, nil)
+
+		resolvePodMetadata(t, e, false, nil)
+
+		assertNoNamedPortsLabels(t, e.labels.IdentityLabels())
+	})
+
+	t.Run("restored endpoint does not gain generated label from metadata", func(t *testing.T) {
+		e := newEndpoint(t, identity.NewIdentity(identity.ReservedIdentityInit, nil), nil)
+
+		resolvePodMetadata(t, e, true, namedPorts)
+
+		assertNoNamedPortsLabels(t, e.labels.IdentityLabels())
+	})
+
+	t.Run("init identity removes disabled generated label", func(t *testing.T) {
+		e := newEndpoint(t, identity.NewIdentity(identity.ReservedIdentityInit, nil), incoming())
+		e.labels.Disabled[ciliumio.NamedPortsIdentityLabelName] = labels.NewLabel(ciliumio.NamedPortsIdentityLabelName, "http.TCP.80", labels.LabelSourceGenerated)
+		e.labels.Disabled[ciliumio.NamedPortsIdentityLabelNameForIndex(1)] = labels.NewLabel(ciliumio.NamedPortsIdentityLabelNameForIndex(1), "https.TCP.443", labels.LabelSourceGenerated)
+
+		e.SetK8sMetadata(nil)
+		e.UpdateLabels(t.Context(), labels.LabelSourceAny, incoming(), nil, false)
+
+		assertNoNamedPortsLabels(t, e.labels.Disabled)
+		assertNoNamedPortsLabels(t, e.labels.IdentityLabels())
+	})
+
+	t.Run("real identity does not gain generated label", func(t *testing.T) {
+		e := newEndpoint(t, identity.NewIdentity(12345, nil), nil)
+
+		e.UpdateLabels(t.Context(), labels.LabelSourceK8s, incoming(), nil, false)
+
+		assertNoNamedPortsLabels(t, e.labels.IdentityLabels())
+	})
+
+	t.Run("real identity preserves generated label on k8s refresh", func(t *testing.T) {
+		current := labels.Labels{
+			"app":                                labels.NewLabel("app", "backend", labels.LabelSourceK8s),
+			ciliumio.NamedPortsIdentityLabelName: labels.NewLabel(ciliumio.NamedPortsIdentityLabelName, "http.TCP.80", labels.LabelSourceGenerated),
+			ciliumio.NamedPortsIdentityLabelNameForIndex(1): labels.NewLabel(
+				ciliumio.NamedPortsIdentityLabelNameForIndex(1), "https.TCP.443", labels.LabelSourceGenerated),
+		}
+		e := newEndpoint(t, identity.NewIdentity(12345, nil), current)
+
+		require.False(t, e.UpdateLabels(t.Context(), labels.LabelSourceK8s, incoming(), nil, false))
+
+		assertNamedPortsLabels(t, e, "http.TCP.80", "https.TCP.443")
+	})
+
+	t.Run("real identity preserves generated label on source any label refresh", func(t *testing.T) {
+		current := labels.Labels{
+			"app":                                labels.NewLabel("app", "backend", labels.LabelSourceK8s),
+			ciliumio.NamedPortsIdentityLabelName: labels.NewLabel(ciliumio.NamedPortsIdentityLabelName, "http.TCP.80", labels.LabelSourceGenerated),
+			ciliumio.NamedPortsIdentityLabelNameForIndex(1): labels.NewLabel(
+				ciliumio.NamedPortsIdentityLabelNameForIndex(1), "https.TCP.443", labels.LabelSourceGenerated),
+		}
+		e := newEndpoint(t, identity.NewIdentity(12345, nil), current)
+
+		e.UpdateLabels(t.Context(), labels.LabelSourceAny, incoming(), nil, false)
+
+		assertNamedPortsLabels(t, e, "http.TCP.80", "https.TCP.443")
+	})
+
+	t.Run("real identity preserves generated label on source any metadata refresh", func(t *testing.T) {
+		current := labels.Labels{
+			"app":                                labels.NewLabel("app", "backend", labels.LabelSourceK8s),
+			ciliumio.NamedPortsIdentityLabelName: labels.NewLabel(ciliumio.NamedPortsIdentityLabelName, "http.TCP.80", labels.LabelSourceGenerated),
+			ciliumio.NamedPortsIdentityLabelNameForIndex(1): labels.NewLabel(
+				ciliumio.NamedPortsIdentityLabelNameForIndex(1), "https.TCP.443", labels.LabelSourceGenerated),
+		}
+		e := newEndpoint(t, identity.NewIdentity(12345, nil), current)
+
+		e.SetK8sMetadata(ciliumTypes.NamedPortMap{
+			"http": {Proto: u8proto.TCP, Port: 8080},
+		})
+		e.UpdateLabels(t.Context(), labels.LabelSourceAny, incoming(), nil, false)
+
+		assertNamedPortsLabels(t, e, "http.TCP.80", "https.TCP.443")
+	})
+
+	t.Run("real identity does not preserve disabled generated label", func(t *testing.T) {
+		e := newEndpoint(t, identity.NewIdentity(12345, nil), incoming())
+		e.labels.Disabled[ciliumio.NamedPortsIdentityLabelName] = labels.NewLabel(ciliumio.NamedPortsIdentityLabelName, "http.TCP.80", labels.LabelSourceGenerated)
+		e.labels.Disabled[ciliumio.NamedPortsIdentityLabelNameForIndex(1)] = labels.NewLabel(ciliumio.NamedPortsIdentityLabelNameForIndex(1), "https.TCP.443", labels.LabelSourceGenerated)
+
+		e.UpdateLabels(t.Context(), labels.LabelSourceAny, incoming(), nil, false)
+
+		assertNoNamedPortsLabels(t, e.labels.Disabled)
+		assertNoNamedPortsLabels(t, e.labels.IdentityLabels())
+	})
+
+	t.Run("real identity ignores changed named ports", func(t *testing.T) {
+		current := labels.Labels{
+			"app":                                labels.NewLabel("app", "backend", labels.LabelSourceK8s),
+			ciliumio.NamedPortsIdentityLabelName: labels.NewLabel(ciliumio.NamedPortsIdentityLabelName, "http.TCP.80", labels.LabelSourceGenerated),
+			ciliumio.NamedPortsIdentityLabelNameForIndex(1): labels.NewLabel(
+				ciliumio.NamedPortsIdentityLabelNameForIndex(1), "https.TCP.443", labels.LabelSourceGenerated),
+		}
+		e := newEndpoint(t, identity.NewIdentity(12345, nil), current)
+
+		e.SetK8sMetadata(ciliumTypes.NamedPortMap{
+			"http": {Proto: u8proto.TCP, Port: 8080},
+		})
+		e.UpdateLabels(t.Context(), labels.LabelSourceK8s, incoming(), nil, false)
+
+		assertNamedPortsLabels(t, e, "http.TCP.80", "https.TCP.443")
+	})
+}
+
 func TestEndpointState(t *testing.T) {
+	s := setupEndpointSuite(t)
+
 	model := newTestEndpointModel(100, StateWaitingForIdentity)
-	p := createTestEndpointParams(t)
-	e, err := NewEndpointFromChangeModel(p, nil, nil, model, nil)
+	p := createEndpointParams(t, s.orchestrator, s.repo, s.fetcher)
+	e, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
 	e.Start(uint16(model.ID))
 	t.Cleanup(e.Stop)
@@ -775,16 +1024,91 @@ func TestWaitForPolicyRevision(t *testing.T) {
 	require.Empty(t, e.policyRevisionSignals)
 }
 
+func TestDeleteRemovesNetworkPolicyWhenIdentityReleaseIsSkipped(t *testing.T) {
+	p := createTestEndpointParams(t)
+	proxy := &recordingRemoveNetworkPolicyProxy{}
+
+	ep, err := NewEndpointFromChangeModel(p, noopDNSRulesAPI{}, proxy, newTestEndpointModel(1234, StateReady), nil)
+	require.NoError(t, err)
+
+	ep.Start(uint16(ep.ID))
+
+	errs := ep.Delete(DeleteConfig{
+		NoIdentityRelease: true,
+		NoIPRelease:       true,
+	})
+	require.Empty(t, errs)
+	require.Equal(t, 1, proxy.calls)
+	require.Equal(t, uint64(ep.ID), proxy.lastEndpointID)
+}
+
+type proxyIDResult struct {
+	id   string
+	port uint16
+}
+
+func collectProxyIDs(seq iter.Seq2[string, uint16]) []proxyIDResult {
+	var results []proxyIDResult
+	for id, port := range seq {
+		results = append(results, proxyIDResult{id: id, port: port})
+	}
+	return results
+}
+
+type testSelectorPolicy struct {
+	portMap map[identity.NumericIdentity]uint16
+}
+
+func (sp *testSelectorPolicy) RedirectFilters() iter.Seq2[*policy.L4Filter, policy.PerSelectorPolicyTuple] {
+	return func(func(*policy.L4Filter, policy.PerSelectorPolicyTuple) bool) {}
+}
+
+func (sp *testSelectorPolicy) DistillPolicy(logger *slog.Logger, owner policy.PolicyOwner, redirects map[string]uint16) *policy.EndpointPolicy {
+	return nil
+}
+
+func (sp *testSelectorPolicy) GetSelectorSnapshot() policy.SelectorSnapshot {
+	return policy.SelectorSnapshot{}
+}
+
+func (sp *testSelectorPolicy) GetEgressNamedPorts(name string, proto u8proto.U8proto, idents iter.Seq[identity.NumericIdentity]) ciliumTypes.NidPortSeq {
+	return func(yield func(identity.NumericIdentity, uint16) bool) {
+		for nid := range idents {
+			if port, ok := sp.portMap[nid]; ok {
+				if !yield(nid, port) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (sp *testSelectorPolicy) AddHold() bool { return true }
+
+func (sp *testSelectorPolicy) ReleaseHold() {}
+
+func (sp *testSelectorPolicy) Detach() {}
+
+func (sp *testSelectorPolicy) Supersede() {}
+
+func (sp *testSelectorPolicy) GetRevision() uint64 { return 0 }
+
 func TestProxyID(t *testing.T) {
 	setupEndpointSuite(t)
 
 	e := &Endpoint{ID: 123, policyRevision: 0}
 	e.UpdateLogger(nil)
 
-	id, port, proto := e.proxyID(&policy.L4Filter{Port: 8080, Protocol: api.ProtoTCP, Ingress: true}, "", policy.SelectorSnapshot{})
+	mockSelectorPolicy := &testSelectorPolicy{portMap: map[identity.NumericIdentity]uint16{
+		101: 8080,
+		102: 9090,
+	}}
+
+	resolved := collectProxyIDs(e.proxyIDs(mockSelectorPolicy, &policy.L4Filter{Port: 8080, Protocol: api.ProtoTCP, U8Proto: u8proto.TCP, Ingress: true}, "", policy.SelectorSnapshot{}))
+	require.Len(t, resolved, 1)
+	id, port := resolved[0].id, resolved[0].port
 	require.NotEmpty(t, id)
 	require.Equal(t, uint16(8080), port)
-	require.Equal(t, u8proto.TCP, proto)
 
 	endpointID, ingress, protocol, port, listener, err := policy.ParseProxyID(id)
 	require.Equal(t, uint16(123), endpointID)
@@ -794,10 +1118,11 @@ func TestProxyID(t *testing.T) {
 	require.Empty(t, listener)
 	require.NoError(t, err)
 
-	id, port, proto = e.proxyID(&policy.L4Filter{Port: 8080, Protocol: api.ProtoTCP, Ingress: true}, "test-listener", policy.SelectorSnapshot{})
+	resolved = collectProxyIDs(e.proxyIDs(mockSelectorPolicy, &policy.L4Filter{Port: 8080, Protocol: api.ProtoTCP, U8Proto: u8proto.TCP, Ingress: true}, "test-listener", policy.SelectorSnapshot{}))
+	require.Len(t, resolved, 1)
+	id, port = resolved[0].id, resolved[0].port
 	require.NotEmpty(t, id)
 	require.Equal(t, uint16(8080), port)
-	require.Equal(t, u8proto.TCP, proto)
 	endpointID, ingress, protocol, port, listener, err = policy.ParseProxyID(id)
 	require.Equal(t, uint16(123), endpointID)
 	require.True(t, ingress)
@@ -807,10 +1132,62 @@ func TestProxyID(t *testing.T) {
 	require.NoError(t, err)
 
 	// Undefined named port
-	id, port, proto = e.proxyID(&policy.L4Filter{PortName: "foobar", Protocol: api.ProtoTCP, Ingress: true}, "", policy.SelectorSnapshot{})
-	require.Empty(t, id)
+	resolved = collectProxyIDs(e.proxyIDs(mockSelectorPolicy, &policy.L4Filter{PortName: "foobar", Protocol: api.ProtoTCP, U8Proto: u8proto.TCP, Ingress: true}, "", policy.SelectorSnapshot{}))
+	require.Empty(t, resolved)
+
+	resolved = collectProxyIDs(e.proxyIDs(mockSelectorPolicy, &policy.L4Filter{Protocol: api.ProtoTCP, U8Proto: u8proto.TCP, Ingress: true}, "", policy.SelectorSnapshot{}))
+	require.Len(t, resolved, 1)
+	id, port = resolved[0].id, resolved[0].port
+	require.NotEmpty(t, id)
 	require.Equal(t, uint16(0), port)
-	require.Equal(t, u8proto.ANY, proto)
+	endpointID, ingress, protocol, port, listener, err = policy.ParseProxyID(id)
+	require.Equal(t, uint16(123), endpointID)
+	require.True(t, ingress)
+	require.Equal(t, "TCP", protocol)
+	require.Equal(t, uint16(0), port)
+	require.Empty(t, listener)
+	require.NoError(t, err)
+
+	resolved = collectProxyIDs(e.proxyIDs(mockSelectorPolicy, &policy.L4Filter{Protocol: api.ProtoTCP, U8Proto: u8proto.TCP}, "test-listener", policy.SelectorSnapshot{}))
+	require.Len(t, resolved, 1)
+	id, port = resolved[0].id, resolved[0].port
+	require.NotEmpty(t, id)
+	require.Equal(t, uint16(0), port)
+	endpointID, ingress, protocol, port, listener, err = policy.ParseProxyID(id)
+	require.Equal(t, uint16(123), endpointID)
+	require.False(t, ingress)
+	require.Equal(t, "TCP", protocol)
+	require.Equal(t, uint16(0), port)
+	require.Equal(t, "test-listener", listener)
+	require.NoError(t, err)
+
+	e.SetK8sMetadata(ciliumTypes.NamedPortMap{
+		"http": {Proto: u8proto.TCP, Port: 7070},
+	})
+	backendSelector, selectorSnapshot := endpointCachedSelectorForIdentities(t, "id=backend", 101, 102)
+	defer selectorSnapshot.Invalidate()
+	resolved = collectProxyIDs(e.proxyIDs(mockSelectorPolicy, &policy.L4Filter{
+		PortName: "http",
+		Protocol: api.ProtoTCP,
+		U8Proto:  u8proto.TCP,
+		PerSelectorPolicies: policy.L7DataMap{
+			backendSelector: nil,
+		},
+	}, "", selectorSnapshot))
+	require.Len(t, resolved, 2)
+	require.Equal(t, uint16(8080), resolved[0].port)
+	require.Equal(t, uint16(9090), resolved[1].port)
+}
+
+func endpointCachedSelectorForIdentities(t testing.TB, selectorLabel string, identities ...identity.NumericIdentity) (policy.CachedSelector, policy.SelectorSnapshot) {
+	identityMap := make(identity.IdentityMap, len(identities))
+	for _, nid := range identities {
+		identityMap[nid] = labels.ParseLabelArray(selectorLabel)
+	}
+
+	selectorCache := policy.NewSelectorCache(hivetest.Logger(t), identityMap)
+	selector, _ := selectorCache.AddIdentitySelectorForTest(&testpolicy.DummySelectorCacheUser{}, api.NewESFromLabels(labels.ParseSelectLabel(selectorLabel)))
+	return selector, selectorCache.GetSelectorSnapshot()
 }
 
 func TestEndpoint_GetK8sPodLabels(t *testing.T) {
@@ -898,6 +1275,8 @@ func (n *EndpointDeadlockEvent) Handle(ifc chan any) {
 // This unit test is a bit weird - see
 // https://github.com/cilium/cilium/pull/8687 .
 func TestEndpointEventQueueDeadlockUponStop(t *testing.T) {
+	s := setupEndpointSuite(t)
+
 	// Need to modify global configuration (hooray!), change back when test is
 	// done.
 	oldQueueSize := option.Config.EndpointQueueSize
@@ -907,8 +1286,8 @@ func TestEndpointEventQueueDeadlockUponStop(t *testing.T) {
 	}()
 
 	model := newTestEndpointModel(12345, StateReady)
-	p := createTestEndpointParams(t)
-	ep, err := NewEndpointFromChangeModel(p, nil, nil, model, nil)
+	p := createEndpointParams(t, s.orchestrator, s.repo, s.fetcher)
+	ep, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
 
 	ep.Start(uint16(model.ID))
@@ -986,9 +1365,11 @@ func TestEndpointEventQueueDeadlockUponStop(t *testing.T) {
 }
 
 func BenchmarkEndpointGetModel(b *testing.B) {
+	s := setupEndpointSuite(b)
+
 	model := newTestEndpointModel(100, StateWaitingForIdentity)
-	p := createTestEndpointParams(b)
-	e, err := NewEndpointFromChangeModel(p, nil, nil, model, nil)
+	p := createEndpointParams(b, s.orchestrator, s.repo, s.fetcher)
+	e, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, model, nil)
 	require.NoError(b, err)
 
 	e.Start(uint16(model.ID))
@@ -1029,7 +1410,7 @@ func (e *Endpoint) getK8sPodLabels() labels.Labels {
 }
 
 func TestMetadataResolver(t *testing.T) {
-	p := createTestEndpointParams(t)
+	s := setupEndpointSuite(t)
 	logger := hivetest.Logger(t)
 
 	tests := []struct {
@@ -1039,21 +1420,21 @@ func TestMetadataResolver(t *testing.T) {
 	}{
 		{
 			name: "pod not found",
-			resolveMetadata: func(ns, podName, uid string) (pod *corev1.Pod, k8sMetadata *K8sMetadata, err error) {
+			resolveMetadata: func(ns, podName, uid string, newPod bool) (pod *corev1.Pod, k8sMetadata *K8sMetadata, err error) {
 				return nil, nil, k8sErrors.NewNotFound(schema.GroupResource{Group: "core", Resource: "pod"}, "foo")
 			},
 			assert: assert.Error,
 		},
 		{
 			name: "pod uid mismatch",
-			resolveMetadata: func(ns, podName, uid string) (pod *corev1.Pod, k8sMetadata *K8sMetadata, err error) {
+			resolveMetadata: func(ns, podName, uid string, newPod bool) (pod *corev1.Pod, k8sMetadata *K8sMetadata, err error) {
 				return nil, nil, errors.New("uid mismatch")
 			},
 			assert: assert.Error,
 		},
 		{
 			name: "pod uid match",
-			resolveMetadata: func(ns, podName, uid string) (pod *corev1.Pod, k8sMetadata *K8sMetadata, err error) {
+			resolveMetadata: func(ns, podName, uid string, newPod bool) (pod *corev1.Pod, k8sMetadata *K8sMetadata, err error) {
 				return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 					Namespace: "bar", Name: "foo", UID: "uid",
 				}}, &K8sMetadata{IdentityLabels: labels.NewLabelsFromSortedList("k8s:foo=bar;k8s:qux=fred;")}, nil
@@ -1067,8 +1448,9 @@ func TestMetadataResolver(t *testing.T) {
 			t.Run(fmt.Sprintf("%s (restored=%t)", tt.name, restored), func(t *testing.T) {
 				model := newTestEndpointModel(100, StateWaitingForIdentity)
 				kvstoreSync := ipcache.NewIPIdentitySynchronizer(logger, kvstore.SetupDummy(t, kvstore.DisabledBackendName))
+				p := createEndpointParams(t, s.orchestrator, s.repo, s.fetcher)
 				p.KVStoreSynchronizer = kvstoreSync
-				ep, err := NewEndpointFromChangeModel(p, nil, nil, model, nil)
+				ep, err := NewEndpointFromChangeModel(p, nil, &FakeEndpointProxy{}, model, nil)
 				require.NoError(t, err)
 
 				ep.K8sNamespace, ep.K8sPodName, ep.K8sUID = "bar", "foo", "uid"
@@ -1090,10 +1472,134 @@ func newTestEndpointModel(id int, state State) *models.EndpointChangeRequest {
 	}
 }
 
-//TODODODODO
+type noopDNSRulesAPI struct{}
+
+func (noopDNSRulesAPI) GetDNSRules(uint16) fqdnrestore.DNSRules { return nil }
+
+func (noopDNSRulesAPI) RemoveRestoredDNSRules(uint16) {}
+
+type recordingRemoveNetworkPolicyProxy struct {
+	FakeEndpointProxy
+	calls          int
+	lastEndpointID uint64
+}
+
+func (p *recordingRemoveNetworkPolicyProxy) RemoveNetworkPolicy(ctx context.Context, ep proxyendpoint.EndpointInfoSource) {
+	p.calls++
+	p.lastEndpointID = ep.GetID()
+}
 
 func (g fakeNodeGetter) Get(ctx context.Context) (node.LocalNode, error) {
 	return node.LocalNode{}, nil
 }
 
 type fakeNodeGetter struct{}
+
+type mockIPCache struct {
+	labels map[string]labels.Labels
+}
+
+func (m *mockIPCache) GetMetadataLabels(ip netip.Addr) labels.Labels {
+	if m.labels == nil {
+		return nil
+	}
+	return m.labels[ip.String()]
+}
+
+func TestComputeCIDRLabels(t *testing.T) {
+	// Backup and restore configuration
+	originalMode := option.Config.PolicyCIDRMatchMode
+	defer func() {
+		option.Config.PolicyCIDRMatchMode = originalMode
+	}()
+
+	ipv4 := netip.MustParseAddr("10.0.0.1")
+	ipv6 := netip.MustParseAddr("fd00::1")
+
+	lblGroup := labels.NewLabel("groupA", "", labels.LabelSourceCIDRGroup)
+	lblCIDR := labels.NewLabel("10.0.0.0/24", "", labels.LabelSourceCIDR)
+
+	tests := []struct {
+		name         string
+		matchMode    []string
+		ipv4         netip.Addr
+		ipv6         netip.Addr
+		ipcache      map[string]labels.Labels
+		expectLabels labels.Labels
+	}{
+		{
+			name:         "PolicyCIDRMatchesPods disabled",
+			matchMode:    nil,
+			ipv4:         ipv4,
+			expectLabels: labels.Labels{},
+		},
+		{
+			name:      "No labels in ipcache (IPv4 only)",
+			matchMode: []string{"pods"},
+			ipv4:      ipv4,
+			expectLabels: labels.Labels{
+				"cidr:0.0.0.0/0": labels.ParseLabel("cidr:0.0.0.0/0"),
+			},
+		},
+		{
+			name:      "No labels in ipcache (dual stack)",
+			matchMode: []string{"pods"},
+			ipv4:      ipv4,
+			ipv6:      ipv6,
+			expectLabels: labels.Labels{
+				"cidr:0.0.0.0/0": labels.ParseLabel("cidr:0.0.0.0/0"),
+				"cidr:::/0":      labels.ParseLabel("cidr:::/0"),
+			},
+		},
+		{
+			name:      "Solely cidrgroup labels in ipcache",
+			matchMode: []string{"pods"},
+			ipv4:      ipv4,
+			ipcache: map[string]labels.Labels{
+				ipv4.String(): {lblGroup.GetExtendedKey(): lblGroup},
+			},
+			expectLabels: labels.Labels{
+				lblGroup.GetExtendedKey(): lblGroup,
+				"cidr:0.0.0.0/0":          labels.ParseLabel("cidr:0.0.0.0/0"),
+			},
+		},
+		{
+			name:      "Specific cidr labels in ipcache",
+			matchMode: []string{"pods"},
+			ipv4:      ipv4,
+			ipcache: map[string]labels.Labels{
+				ipv4.String(): {lblCIDR.GetExtendedKey(): lblCIDR},
+			},
+			expectLabels: labels.Labels{
+				lblCIDR.GetExtendedKey(): lblCIDR,
+			},
+		},
+		{
+			name:      "Both cidr and cidrgroup labels in ipcache",
+			matchMode: []string{"pods"},
+			ipv4:      ipv4,
+			ipcache: map[string]labels.Labels{
+				ipv4.String(): {
+					lblCIDR.GetExtendedKey():  lblCIDR,
+					lblGroup.GetExtendedKey(): lblGroup,
+				},
+			},
+			expectLabels: labels.Labels{
+				lblCIDR.GetExtendedKey():  lblCIDR,
+				lblGroup.GetExtendedKey(): lblGroup,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			option.Config.PolicyCIDRMatchMode = tt.matchMode
+			ep := &Endpoint{
+				IPv4:    tt.ipv4,
+				IPv6:    tt.ipv6,
+				ipcache: &mockIPCache{labels: tt.ipcache},
+			}
+			assert.Equal(t, tt.expectLabels, ep.computeCIDRLabelsRLocked())
+		})
+	}
+}

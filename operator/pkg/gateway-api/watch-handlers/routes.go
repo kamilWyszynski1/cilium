@@ -51,3 +51,29 @@ func EnqueueRequestForOwningGRPCRoute(c client.Client, logger *slog.Logger, cont
 		return getGatewayReconcileRequestsForRoute(ctx, c, a, gr.Spec.CommonRouteSpec, logger, controllerName)
 	})
 }
+
+// EnqueueRequestForOwningTCPRoute returns an event handler that, when passed a TCPRoute, returns reconcile.Requests
+// for any Cilium-relevant Gateways associated with that TCPRoute.
+func EnqueueRequestForOwningTCPRoute(c client.Client, logger *slog.Logger, controllerName string) handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, a client.Object) []reconcile.Request {
+		tr, ok := a.(*gatewayv1.TCPRoute)
+		if !ok {
+			return nil
+		}
+
+		return getGatewayReconcileRequestsForRoute(context.Background(), c, a, tr.Spec.CommonRouteSpec, logger, controllerName)
+	})
+}
+
+// EnqueueRequestForOwningUDPRoute returns an event handler that, when passed a UDPRoute, returns reconcile.Requests
+// for any Cilium-relevant Gateways associated with that UDPRoute.
+func EnqueueRequestForOwningUDPRoute(c client.Client, logger *slog.Logger, controllerName string) handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, a client.Object) []reconcile.Request {
+		ur, ok := a.(*gatewayv1.UDPRoute)
+		if !ok {
+			return nil
+		}
+
+		return getGatewayReconcileRequestsForRoute(context.Background(), c, a, ur.Spec.CommonRouteSpec, logger, controllerName)
+	})
+}

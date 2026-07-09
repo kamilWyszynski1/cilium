@@ -6,6 +6,7 @@ package config
 import (
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -41,7 +42,23 @@ func NodeConfig(lnc *Config) Node {
 	node.SupportsFIBLookupSkipNeigh = probes.HaveFibLookupSkipNeigh() == nil
 	node.SupportsFIBLookupSrc = probes.HaveFibLookupSrc() == nil
 
+	// Terminate inbound IPIP in BPF on netdev ingress for any outer dst that
+	// resolves to a local endpoint - pod IP (DSR-IPIP) or host IP (hostNetwork
+	// backend, --enable-ipip-termination Envoy target). With this in place,
+	// cilium_ipip{4,6} are TX-only (egress encap on the LB side) and bpf_host
+	// is not attached to them on RX. The inner packet is delivered with
+	// skb->dev set to the physical netdev rather than cilium_ipip{4,6}, so any
+	// host-side listener that depended on SO_BINDTODEVICE against
+	// cilium_ipip{4,6} will no longer match decapped traffic.
+	node.EnableIPIPTermination = option.Config.EnableIPIPTermination
+
 	node.EnableNodeportSourceLookup = lnc.LBConfig.NodePortEnableDynamicSourceLookup
+
+	node.LBDefaultAlg = uint8(loadbalancer.SVCLoadBalancingAlgorithmRandom)
+	if lnc.LBConfig.LBAlgorithm == loadbalancer.LBAlgorithmMaglev {
+		node.LBDefaultAlg = uint8(loadbalancer.SVCLoadBalancingAlgorithmMaglev)
+	}
+	node.LBSelectionPerService = lnc.LBConfig.AlgorithmAnnotation
 
 	node.TracingIPOptionType = uint8(option.Config.IPTracingOptionType)
 
@@ -76,6 +93,10 @@ func NodeConfig(lnc *Config) Node {
 	node.EnableEndpointRoutes = option.Config.EnableEndpointRoutes
 
 	node.EnableIdentityMark = option.Config.EnableIdentityMark
+
+	node.EnableBPFHostRouting = !option.Config.UnsafeDaemonConfigOption.EnableHostLegacyRouting
+
+	node.EncryptionStrictIngress = option.Config.EnableEncryptionStrictModeIngress
 
 	return node
 }

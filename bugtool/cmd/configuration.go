@@ -160,14 +160,19 @@ func defaultCommands(confDir string, cmdDir string) []string {
 	commands = append(commands, copyStateDirCommand(cmdDir)...)
 	commands = append(commands, tcInterfaceCommands()...)
 
-	// We want to collect this twice: at the very beginning and at the
+	// We want to collect these twice: at the very beginning and at the
 	// very end of the bugtool collection, to see if the counters are
 	// increasing.
 	// The commands end up being the names of the files where their output
 	// is stored, so we can't have the two commands be the exact same or the
 	// second would overwrite. To avoid that, we use the -u flag in this second
 	// command; that flag is documented as being ignored.
-	commands = append(commands, "cat -u /proc/net/xfrm_stat")
+	commands = append(commands,
+		"cat -u /proc/net/xfrm_stat",
+		"cat -u /proc/net/softnet_stat",
+		"cat -u /proc/net/snmp",
+		"cat -u /proc/net/netstat",
+	)
 
 	return commands
 }
@@ -178,6 +183,18 @@ func miscSystemCommands() []string {
 		// very end of the bugtool collection, to see if the counters are
 		// increasing.
 		"cat /proc/net/xfrm_stat",
+		// Host packet-drop counters, collected at the start and, via the -u
+		// variants in defaultCommands, at the end so the delta over the
+		// collection window is visible. softnet_stat is the only place a packet
+		// dropped before it reaches a netdev or socket queue is counted: column
+		// 2 is the per-CPU backlog drop count (netdev_max_backlog exceeded) and
+		// column 3 is time_squeeze (softirq ran out of budget, i.e. the CPU
+		// could not keep up). snmp and netstat add the IP/TCP layer drop
+		// counters (e.g. ListenDrops, ListenOverflows, TCPBacklogDrop) that tell
+		// a socket accept-queue drop apart from a backlog drop.
+		"cat /proc/net/softnet_stat",
+		"cat /proc/net/snmp",
+		"cat /proc/net/netstat",
 		// Host and misc
 		"ps auxfw",
 		"hostname",
@@ -386,6 +403,7 @@ func ciliumDbgCommands(cmdDir string) []string {
 		fmt.Sprintf("cilium-dbg debuginfo --output=markdown,json -f --output-directory=%s", cmdDir),
 		"cilium-dbg metrics list",
 		"cilium-dbg shell -- metrics/html",
+		"cilium-dbg shell -- health/history",
 		"cilium-dbg bpf metrics list",
 		"cilium-dbg fqdn cache list",
 		"cilium-dbg config -a",
@@ -439,6 +457,8 @@ func ciliumDbgCommands(cmdDir string) []string {
 		"cilium-dbg shell -- bgp/routes -a out ipv4 unicast",
 		"cilium-dbg shell -- bgp/routes -a out ipv6 unicast",
 		"cilium-dbg shell -- bgp/route-policies",
+		"cilium-dbg shell -- policy/mapstate/entries",
+		"cilium-dbg shell -- policy/mapstate/topk",
 		"cilium-dbg troubleshoot kvstore",
 		"cilium-dbg troubleshoot clustermesh",
 		"cilium-dbg bpf frag list",

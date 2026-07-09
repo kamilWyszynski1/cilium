@@ -83,6 +83,8 @@ type nodeOperationsMock struct {
 	// mutex protects allocatedIPs
 	mutex        lock.RWMutex
 	allocatedIPs []string
+
+	attachedCIDRs []netip.Prefix
 }
 
 func (n *nodeOperationsMock) GetUsedIPWithPrefixes() int {
@@ -191,6 +193,18 @@ func (n *nodeOperationsMock) GetMinimumAllocatableIPv4() int {
 
 func (n *nodeOperationsMock) IsPrefixDelegated() bool {
 	return false
+}
+
+func (n *nodeOperationsMock) GetAttachedCIDRs() []netip.Prefix {
+	return n.attachedCIDRs
+}
+
+func (n *nodeOperationsMock) PrepareCIDRRelease(_ []netip.Prefix) []*ReleaseAction {
+	return nil
+}
+
+func (n *nodeOperationsMock) ReleaseCIDRs(_ context.Context, _ *ReleaseAction) ([]netip.Prefix, error) {
+	return nil, nil
 }
 
 func TestGetNodeNames(t *testing.T) {
@@ -806,7 +820,7 @@ func TestNodeManagerManyNodes(t *testing.T) {
 	}
 
 	// The above check returns as soon as the address requirements are met.
-	// The metrics may still be oudated, resync all nodes to update
+	// The metrics may still be outdated, resync all nodes to update
 	// metrics.
 	mngr.Resync(t.Context(), time.Now())
 

@@ -57,7 +57,7 @@ concurrency:
 
 env:
   # renovate: datasource=golang-version depName=go
-  go-version: 1.26.3
+  go-version: 1.26.5
 
 jobs:
   echo-inputs:
@@ -111,7 +111,7 @@ jobs:
           sha: ${{ inputs.SHA || github.sha }}
 
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -120,7 +120,7 @@ jobs:
         uses: ./.github/actions/disk-cleanup
 
       - name: Checkout base branch
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ inputs.base-SHA || github.sha }}
           persist-credentials: false
@@ -129,7 +129,7 @@ jobs:
       # Warning: since this is a privileged workflow, subsequent workflow job
       # steps must take care not to execute untrusted code.
       - name: Checkout pull request branch (NOT TRUSTED)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         if: ${{ github.event_name == 'workflow_dispatch' }}
         with:
           ref: ${{ inputs.SHA }}
@@ -142,23 +142,23 @@ jobs:
           KERNEL="${{ matrix.kernel }}"
           case "$KERNEL" in
             # renovate: datasource=docker depName=quay.io/lvh-images/complexity-test
-            "5.15") FULL_KERNEL="5.15-20260310.122539" ;;
+            "5.15") FULL_KERNEL="5.15-20260706.013554" ;;
             # renovate: datasource=docker depName=quay.io/lvh-images/complexity-test
-            "6.1") FULL_KERNEL="6.1-20260310.122539" ;;
+            "6.1") FULL_KERNEL="6.1-20260706.013554" ;;
             # renovate: datasource=docker depName=quay.io/lvh-images/complexity-test
-            "6.6") FULL_KERNEL="6.6-20260310.122539" ;;
+            "6.6") FULL_KERNEL="6.6-20260706.013554" ;;
             # renovate: datasource=docker depName=quay.io/lvh-images/complexity-test
-            "6.12") FULL_KERNEL="6.12-20260310.122539" ;;
+            "6.12") FULL_KERNEL="6.12-20260706.013554" ;;
             # renovate: datasource=docker depName=quay.io/lvh-images/complexity-test
-            "6.18") FULL_KERNEL="6.18-20260310.122539" ;;
+            "6.18") FULL_KERNEL="6.18-20260706.013554" ;;
             # renovate: datasource=docker depName=quay.io/lvh-images/complexity-test
-            "bpf-next") FULL_KERNEL="bpf-next-20260310.122539" ;;
+            "bpf-next") FULL_KERNEL="bpf-next-20260706.013554" ;;
             *) FULL_KERNEL="$KERNEL" ;;
           esac
           echo "full=${FULL_KERNEL}" >> $GITHUB_OUTPUT
 
       - name: Provision LVH VMs
-        uses: cilium/little-vm-helper@e249f34602b03d331320955be94cbaa2cc4fb6a8 # v0.0.29
+        uses: cilium/little-vm-helper@5ae749011735fd77f30f38add52f1a53a5568671 # v0.0.30
         with:
           test-name: datapath-bpf-complexity
           image: 'complexity-test'
@@ -167,7 +167,7 @@ jobs:
           images-folder-parent: "/tmp"
           cpu: 4
           # renovate: datasource=github-tags depName=cilium/little-vm-helper
-          lvh-version: "v0.0.29"
+          lvh-version: "v0.0.30"
           install-dependencies: 'true'
           cmd: |
             for i in {1..5}; do curl "https://golang.org" > /dev/null 2>&1 && break || sleep 5; echo "Waiting for systemd-resolved to be ready..."; done
@@ -197,7 +197,7 @@ jobs:
             rm -r /var/tmp/llvm
 
       - name: Run verifier tests (on base branch)
-        uses: cilium/little-vm-helper@e249f34602b03d331320955be94cbaa2cc4fb6a8 # v0.0.29
+        uses: cilium/little-vm-helper@5ae749011735fd77f30f38add52f1a53a5568671 # v0.0.30
         with:
           provision: 'false'
           cmd: |
@@ -210,7 +210,7 @@ jobs:
             mv /host/datapath-verifier/verifier-complexity.json /host/datapath-verifier/verifier-complexity-base.json
 
       - name: Run verifier tests (on PR branch)
-        uses: cilium/little-vm-helper@e249f34602b03d331320955be94cbaa2cc4fb6a8 # v0.0.29
+        uses: cilium/little-vm-helper@5ae749011735fd77f30f38add52f1a53a5568671 # v0.0.30
         if: ${{ github.event_name == 'workflow_dispatch' }}
         with:
           provision: 'false'
@@ -238,7 +238,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
     - name: Checkout pull request branch (NOT TRUSTED)
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
         ref: ${{ inputs.SHA || github.sha }}
         persist-credentials: false
@@ -285,4 +285,4 @@ jobs:
         uses: cilium/cilium/.github/actions/set-commit-status@main # main
         with:
           sha: ${{ inputs.SHA || github.sha }}
-          status: ${{ needs.setup-and-test.result == 'success' && needs.merge-and-diff.result }}
+          status: ${{ needs.setup-and-test.result == 'success' && needs.merge-and-diff.result || needs.setup-and-test.result }}

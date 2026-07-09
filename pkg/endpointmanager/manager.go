@@ -34,6 +34,7 @@ import (
 	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/revert"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -206,6 +207,9 @@ func (mgr *endpointManager) UpdatePolicyMaps(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, mgr.config.EndpointPolicyUpdateTimeout)
 	defer cancel()
 
+	var guard lock.Mutex
+	var finalizeList revert.FinalizeList
+	var revertStack revert.RevertStack
 	proxyWaitGroup := completion.NewWaitGroup(ctx)
 
 	eps := mgr.GetEndpoints()
@@ -213,7 +217,13 @@ func (mgr *endpointManager) UpdatePolicyMaps(ctx context.Context) error {
 
 	for _, ep := range eps {
 		go func(ep *endpoint.Endpoint) {
-			if err := ep.ApplyPolicyMapChanges(proxyWaitGroup); err != nil && !errors.Is(err, endpoint.ErrNotAlive) {
+			err, rf, ff := ep.ApplyPolicyMapChanges(proxyWaitGroup)
+			guard.Lock()
+			revertStack.Push(rf)
+			finalizeList.Append(ff)
+			guard.Unlock()
+
+			if err != nil && !errors.Is(err, endpoint.ErrNotAlive) {
 				ep.Logger("endpointmanager").Warn("Failed to apply policy map changes. These will be re-applied in future updates.", logfields.Error, err)
 			}
 			wg.Done()
@@ -224,9 +234,18 @@ func (mgr *endpointManager) UpdatePolicyMaps(ctx context.Context) error {
 	// changes before waiting for the changes to be ACKed
 	wg.Wait()
 
+	// wait for proxy completions can return with no error immediately without waiting for
+	// anything if all Endpoint updates failed synchronously, but even in that case calling the
+	// finalize functions is the right thing to do.
 	err := mgr.waitForProxyCompletions(proxyWaitGroup)
+
+	// no endpoint locks needed here, as ApplyPolicyMapChanges currently collects
+	// revert/finalize functions only from UpdateNetworkPolicy
 	if err != nil {
+		revertStack.Revert()
 		mgr.logger.Warn("Failed to apply L7 proxy policy changes. These will be re-applied in future updates.", logfields.Error, err)
+	} else {
+		finalizeList.Finalize()
 	}
 
 	// Perform policy update call if required.
@@ -305,18 +324,6 @@ func (mgr *endpointManager) Lookup(id string) (*endpoint.Endpoint, error) {
 
 	case endpointid.CNIAttachmentIdPrefix:
 		return mgr.lookupCNIAttachmentID(eid), nil
-
-	case endpointid.ContainerIdPrefix:
-		return mgr.lookupContainerID(eid), nil
-
-	case endpointid.DockerEndpointPrefix:
-		return mgr.lookupDockerEndpoint(eid), nil
-
-	case endpointid.ContainerNamePrefix:
-		return mgr.lookupDockerContainerName(eid), nil
-
-	case endpointid.PodNamePrefix:
-		return mgr.lookupPodNameLocked(eid), nil
 
 	case endpointid.CEPNamePrefix:
 		return mgr.lookupCEPNameLocked(eid), nil
@@ -454,37 +461,54 @@ func (mgr *endpointManager) unexpose(ep *endpoint.Endpoint) {
 	defer ep.Close()
 	identifiers := ep.Identifiers()
 
-	previousState := ep.GetState()
-
 	mgr.mutex.Lock()
 	defer mgr.mutex.Unlock()
 
-	// This must be done before the ID is released for the endpoint!
 	delete(mgr.endpoints, ep.ID)
 	mgr.mcastManager.RemoveAddress(ep.IPv6)
-
-	// We haven't yet allocated the ID for a restoring endpoint, so no
-	// need to release it.
-	if previousState != endpoint.StateRestoring {
-		if err := mgr.epIDAllocator.release(ep.ID); err != nil {
-			mgr.logger.Warn(
-				"Unable to release endpoint ID",
-				logfields.Error, err,
-				logfields.State, previousState,
-				logfields.CNIAttachmentID, identifiers[endpointid.CNIAttachmentIdPrefix],
-				logfields.CEPName, identifiers[endpointid.CEPNamePrefix],
-			)
-		}
-	}
-
 	mgr.removeReferencesLocked(identifiers)
+}
+
+// releaseID returns the endpoint ID to the allocator pool. It must be called
+// only after ep.Delete has removed the endpoint's state directories, so a new
+// endpoint cannot reuse the ID before cleanup completes.
+func (mgr *endpointManager) releaseID(ep *endpoint.Endpoint) {
+	if err := mgr.epIDAllocator.release(ep.ID); err != nil {
+		identifiers := ep.Identifiers()
+		mgr.logger.Warn(
+			"Unable to release endpoint ID",
+			logfields.Error, err,
+			logfields.State, ep.GetState(),
+			logfields.CNIAttachmentID, identifiers[endpointid.CNIAttachmentIdPrefix],
+			logfields.CEPName, identifiers[endpointid.CEPNamePrefix],
+		)
+	}
 }
 
 // removeEndpoint stops the active handling of events by the specified endpoint,
 // and prevents the endpoint from being globally accessible via other packages.
 func (mgr *endpointManager) removeEndpoint(ep *endpoint.Endpoint, conf endpoint.DeleteConfig) []error {
+	// Capture before ep.Delete moves the state to StateDisconnecting.
+	isRestored := ep.GetState() == endpoint.StateRestoring
+
 	mgr.unexpose(ep)
+
+	// Guard the per-endpoint routing rule teardown against a stale delete. By
+	// this point unexpose has removed ep from the IP index, so LookupIP returns
+	// nil when no one owns the IP (safe to delete our rules) and the new owner
+	// when the IP has already been reused (skip, deleting would strip its
+	// rules). It can never return ep itself.
+	conf.EndpointOwnsIP = func(ip netip.Addr) bool {
+		owner := mgr.LookupIP(ip)
+		return owner == nil || owner == ep
+	}
+
 	result := ep.Delete(conf)
+
+	// Restored endpoints never had an ID allocated.
+	if !isRestored {
+		mgr.releaseID(ep)
+	}
 
 	if !option.Config.DryMode {
 		_ = mgr.monitorAgent.SendEvent(monitorAPI.MessageTypeAgent, monitorAPI.EndpointDeleteMessage(ep))
@@ -513,29 +537,8 @@ func (mgr *endpointManager) lookupCiliumID(id uint16) *endpoint.Endpoint {
 	return nil
 }
 
-func (mgr *endpointManager) lookupDockerEndpoint(id string) *endpoint.Endpoint {
-	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.DockerEndpointPrefix, id)]; ok {
-		return ep
-	}
-	return nil
-}
-
-func (mgr *endpointManager) lookupPodNameLocked(name string) *endpoint.Endpoint {
-	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.PodNamePrefix, name)]; ok {
-		return ep
-	}
-	return nil
-}
-
 func (mgr *endpointManager) lookupCEPNameLocked(name string) *endpoint.Endpoint {
 	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.CEPNamePrefix, name)]; ok {
-		return ep
-	}
-	return nil
-}
-
-func (mgr *endpointManager) lookupDockerContainerName(name string) *endpoint.Endpoint {
-	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.ContainerNamePrefix, name)]; ok {
 		return ep
 	}
 	return nil
@@ -550,13 +553,6 @@ func (mgr *endpointManager) lookupIPv4(ipv4 string) *endpoint.Endpoint {
 
 func (mgr *endpointManager) lookupIPv6(ipv6 string) *endpoint.Endpoint {
 	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.IPv6Prefix, ipv6)]; ok {
-		return ep
-	}
-	return nil
-}
-
-func (mgr *endpointManager) lookupContainerID(id string) *endpoint.Endpoint {
-	if ep, ok := mgr.endpointsAux[endpointid.NewID(endpointid.ContainerIdPrefix, id)]; ok {
 		return ep
 	}
 	return nil
@@ -632,6 +628,21 @@ func (mgr *endpointManager) TriggerRegenerateAllEndpoints() {
 	mgr.controllers.TriggerController(regenEndpointControllerName)
 
 	// Trigger regeneration of all Endpoint Policies
+	mgr.policyUpdateCallback(&sync.WaitGroup{}, nil, false)
+}
+
+// RegenerateAllForPolicy regenerates all endpoints against the given policy
+// revision. Each endpoint's regeneration blocks until the compute cell has
+// published the SelectorPolicy for its identity at waitFor, ensuring
+// endpoints pick up the new policy instead of the stale one.
+func (mgr *endpointManager) RegenerateAllForPolicy(waitFor uint64) {
+	go mgr.RegenerateAllEndpoints(&regeneration.ExternalRegenerationMetadata{
+		Reason:                  regeneration.ReasonPolicyUpdate,
+		Message:                 "policy rules updated",
+		RegenerationLevel:       regeneration.RegenerateWithoutDatapath,
+		PolicyRevisionToWaitFor: waitFor,
+	})
+
 	mgr.policyUpdateCallback(&sync.WaitGroup{}, nil, false)
 }
 
@@ -891,4 +902,33 @@ func (mgr *endpointManager) stopEndpoints() {
 	wg.Wait()
 
 	mgr.logger.Info("All endpoints' goroutines stopped.")
+}
+
+// UpdateCIDRLabels triggers identity resolution for all pod endpoints
+// whose IPs are contained within the given prefix. Implements ipcache.CIDRSelectorAllocator.
+//
+// If the prefix represents a single IP address, it performs an optimized map lookup
+// and returns true if a matching endpoint is found. Otherwise, it performs a linear
+// scan over all endpoints and returns false.
+func (mgr *endpointManager) UpdateCIDRLabels(ctx context.Context, prefix netip.Prefix) bool {
+	if prefix.IsSingleIP() {
+		ep := mgr.LookupIP(prefix.Addr())
+		if ep == nil {
+			return false // No endpoint matching this IP is managed on this node.
+		}
+
+		// Trigger asynchronous identity resolution for the endpoint.
+		// Since this is called from the label injector thread, running it asynchronously
+		// prevents blocking the metadata injection pipeline on KVStore/APIServer latency.
+		ep.ForceUpdateCIDRLabels(ctx)
+		return true
+	}
+
+	for _, ep := range mgr.GetEndpoints() {
+		if (ep.IPv4.IsValid() && prefix.Contains(ep.IPv4)) || (ep.IPv6.IsValid() && prefix.Contains(ep.IPv6)) {
+			// Trigger asynchronous identity resolution for the endpoint.
+			ep.ForceUpdateCIDRLabels(ctx)
+		}
+	}
+	return false
 }

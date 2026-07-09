@@ -46,13 +46,6 @@ const (
 	// reflectorBufferSize is the maximum size of the event buffer.
 	reflectorBufferSize = 500
 
-	// reflectorWaitTime is the maximum amount of time to try and fill the buffer.
-	// A higher wait time will reduce processing of transient states and increases
-	// throughput as it gives bigger batches downstream for processing. Batching
-	// also helps to combine related objects, e.g. a Service may have multiple
-	// associated EndpointSlices and preferably these would be processed together.
-	reflectorWaitTime = 500 * time.Millisecond
-
 	// K8sInitializerPrefix is the StateDB initializer prefix used here. This can
 	// be used to wait for the tables to be populated just from k8s even when
 	// other initializers are present.
@@ -101,7 +94,7 @@ func (p reflectorParams) waitTime() time.Duration {
 		// Use a much lower wait time in tests to trigger more edge cases and make them faster.
 		return 10 * time.Millisecond
 	}
-	return reflectorWaitTime
+	return p.Config.ReflectorWaitTime
 }
 
 func RegisterK8sReflector(p reflectorParams) {
@@ -112,17 +105,22 @@ func RegisterK8sReflector(p reflectorParams) {
 		p.SVCMetrics = NewSVCMetricsNoop()
 	}
 
-	podsComplete := p.Writer.RegisterInitializer(K8sInitializerPrefix + "pods")
 	epsComplete := p.Writer.RegisterInitializer(K8sInitializerPrefix + "endpoints")
 	svcComplete := p.Writer.RegisterInitializer(K8sInitializerPrefix + "services")
 	p.JobGroup.Add(
 		job.OneShot("reflect-services-endpoints", func(ctx context.Context, health cell.Health) error {
 			return runServiceEndpointsReflector(ctx, health, p, svcComplete, epsComplete)
 		}),
-		job.OneShot("reflect-pods", func(ctx context.Context, health cell.Health) error {
-			return runPodReflector(ctx, health, p, podsComplete)
-		}),
 	)
+
+	if p.ExtConfig.KubeProxyReplacement {
+		podsComplete := p.Writer.RegisterInitializer(K8sInitializerPrefix + "pods")
+		p.JobGroup.Add(
+			job.OneShot("reflect-pods", func(ctx context.Context, health cell.Health) error {
+				return runPodReflector(ctx, health, p, podsComplete)
+			}),
+		)
+	}
 }
 
 func runPodReflector(ctx context.Context, health cell.Health, p reflectorParams, initComplete func(writer.WriteTxn)) error {
@@ -145,18 +143,13 @@ func runPodReflector(ctx context.Context, health cell.Health, p reflectorParams,
 	processBuffer := func(txn writer.WriteTxn, buf iter.Seq2[types.NamespacedName, statedb.Change[k8sTables.LocalPod]]) {
 		for _, change := range buf {
 			obj := change.Object.Pod
-			if obj.Spec.HostNetwork {
-				continue
-			}
 
 			podName := obj.Namespace + "/" + obj.Name
-			if change.Deleted {
+			if change.Deleted || obj.Spec.HostNetwork {
 				rh.update(podName, nil)
-				if p.ExtConfig.KubeProxyReplacement {
-					if err := deleteHostPort(p, txn, obj); err != nil {
-						p.Log.Error("BUG: Unexpected failure in deleteHostPort",
-							logfields.Error, err)
-					}
+				if err := deleteHostPort(p, txn, obj); err != nil {
+					p.Log.Error("BUG: Unexpected failure in deleteHostPort",
+						logfields.Error, err)
 				}
 			} else {
 				switch obj.Status.Phase {
@@ -164,11 +157,9 @@ func runPodReflector(ctx context.Context, health cell.Health, p reflectorParams,
 					// Pod has been terminated. Clean up the HostPort already even before the Pod object
 					// has been removed to free up the HostPort for other pods.
 					rh.update(podName, nil)
-					if p.ExtConfig.KubeProxyReplacement {
-						if err := deleteHostPort(p, txn, obj); err != nil {
-							p.Log.Error("BUG: Unexpected failure in deleteHostPort",
-								logfields.Error, err)
-						}
+					if err := deleteHostPort(p, txn, obj); err != nil {
+						p.Log.Error("BUG: Unexpected failure in deleteHostPort",
+							logfields.Error, err)
 					}
 				case slim_corev1.PodRunning:
 					var err error
@@ -179,9 +170,7 @@ func runPodReflector(ctx context.Context, health cell.Health, p reflectorParams,
 						continue
 					}
 
-					if p.ExtConfig.KubeProxyReplacement {
-						err = upsertHostPort(p.HaveNetNSCookieSupport, p.Config, p.ExtConfig, p.Log, txn, p.Writer, obj)
-					}
+					err = upsertHostPort(p.HaveNetNSCookieSupport, p.Config, p.ExtConfig, p.Log, txn, p.Writer, obj)
 					rh.update(podName, err)
 				}
 			}

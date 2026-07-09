@@ -238,6 +238,26 @@ type EndpointKey struct {
 	ClusterID uint16
 }
 
+// Identity is generated from the BPF C type identity.
+type Identity uint32
+
+const (
+	IdentityUnknownID           Identity = 0
+	IdentityHostID              Identity = 1
+	IdentityWorldID             Identity = 2
+	IdentityUnmanagedID         Identity = 3
+	IdentityHealthID            Identity = 4
+	IdentityInitID              Identity = 5
+	IdentityLocalNodeID         Identity = 6
+	IdentityRemoteNodeID        Identity = 6
+	IdentityKubeAPIServerNodeID Identity = 7
+	IdentityIngressID           Identity = 8
+	IdentityWorldIPv4ID         Identity = 9
+	IdentityWorldIPv6ID         Identity = 10
+	IdentityPolicyClusterID     Identity = 11
+	IdentityPolicyClusterMeshID Identity = 12
+)
+
 // IPCacheKey is generated from the BPF C type ipcache_key.
 type IPCacheKey struct {
 	_      structs.HostLayout
@@ -864,48 +884,6 @@ type SkipLB6Key struct {
 	Pad  uint32
 	Port uint16
 	Pad2 uint16
-}
-
-// SNATV6Args is generated from the BPF C type snat_v6_args.
-type SNATV6Args struct {
-	_     structs.HostLayout
-	Tuple struct {
-		_     structs.HostLayout
-		DAddr struct {
-			_    structs.HostLayout
-			Addr [16]uint8
-		}
-		SAddr struct {
-			_    structs.HostLayout
-			Addr [16]uint8
-		}
-		DPort   uint16
-		SPort   uint16
-		Nexthdr uint8
-		Flags   uint8
-	}
-	_      [2]byte
-	Target struct {
-		_    structs.HostLayout
-		Addr struct {
-			_    structs.HostLayout
-			Addr [16]uint8
-		}
-		MinPort           uint16
-		MaxPort           uint16
-		FromLocalEndpoint bool
-		NeedsCT           bool
-		EgressGateway     bool
-		_                 [1]byte
-		IfIndex           uint32
-		Tbid              uint32
-	}
-	Trace struct {
-		_       structs.HostLayout
-		Reason  uint8
-		_       [3]byte
-		Monitor uint32
-	}
 }
 
 // SRv6PolicyKey4 is generated from the BPF C type srv6_policy_key4.

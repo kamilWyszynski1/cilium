@@ -26,22 +26,26 @@ Cilium Gateway API Support
 Cilium supports Gateway API v1.5.1 for below resources, all the Core conformance
 tests are passed.
 
-- `GatewayClass <https://gateway-api.sigs.k8s.io/api-types/gatewayclass/>`_
-- `Gateway <https://gateway-api.sigs.k8s.io/api-types/gateway/>`_
-- `HTTPRoute <https://gateway-api.sigs.k8s.io/api-types/httproute/>`_
-- `GRPCRoute <https://gateway-api.sigs.k8s.io/api-types/grpcroute/>`__
-- `TLSRoute <https://gateway-api.sigs.k8s.io/api-types/tlsroute/>`__
-- `BackendTLSPolicy <https://gateway-api.sigs.k8s.io/api-types/backendtlspolicy/>`__
-- `ReferenceGrant <https://gateway-api.sigs.k8s.io/api-types/referencegrant/>`_
+- `GatewayClass <https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/>`_
+- `Gateway <https://gateway-api.sigs.k8s.io/reference/api-types/gateway/>`_
+- `HTTPRoute <https://gateway-api.sigs.k8s.io/reference/api-types/httproute/>`_
+- `GRPCRoute <https://gateway-api.sigs.k8s.io/reference/api-types/grpcroute/>`__
+- `TLSRoute <https://gateway-api.sigs.k8s.io/reference/api-types/tlsroute/>`__
+- `BackendTLSPolicy <https://gateway-api.sigs.k8s.io/reference/api-types/policy/backendtlspolicy/>`__
+- `ReferenceGrant <https://gateway-api.sigs.k8s.io/reference/api-types/referencegrant/>`_
+- `ListenerSet <https://gateway-api.sigs.k8s.io/guides/user-guides/listener-set/>`__
+- `TCPRoute (experimental) <https://gateway-api.sigs.k8s.io/reference/api-spec/main/spec/#tcproute>`__
+- `UDPRoute (experimental) <https://gateway-api.sigs.k8s.io/reference/api-spec/main/spec/#udproute>`__
 
 Additionally, Cilium provides ``CiliumGatewayClassConfig`` CRD, which can be referenced in
-`GatewayClass.parametersRef <https://gateway-api.sigs.k8s.io/api-types/gatewayclass/#gatewayclass-parameters>`_.
+`GatewayClass.parametersRef <https://gateway-api.sigs.k8s.io/reference/api-types/gatewayclass/#gatewayclass-parameters>`_.
 
 .. admonition:: Video
  :class: attention
 
   If you'd like more insights on Cilium's Gateway API support, check out `eCHO episode 58: Cilium Service Mesh and Ingress <https://www.youtube.com/watch?v=60epwCxO8G4&index=80&t=2024s>`__.
 
+.. _gs_gateway_api_prerequisites:
 .. include:: installation.rst
 
 .. include:: ../ingress-reference.rst
@@ -69,6 +73,9 @@ Cilium's Gateway API features:
    header
    parameterized-gatewayclass
    default-tls-certificate
+   backendtlspolicy
+   access-logs
+   listenerset
 
 More examples can be found in the `upstream repository <https://github.com/kubernetes-sigs/gateway-api/tree/v1.3.0/examples/standard>`_.
 

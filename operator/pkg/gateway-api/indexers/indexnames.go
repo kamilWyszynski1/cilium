@@ -41,7 +41,36 @@ const (
 	// Service as a parent.
 	GammaGRPCRouteParentRefsIndex = "gammaGRPCRouteParentRefs"
 
-	// Indexes GatewayClassCiliumGatewayClassConfigsIndex indexes GatewayClass by the CiliumGatewayClassConfig
-	// that it refers to.
+	// Indexes GatewayClass objects by the CiliumGatewayClassConfig they reference.
 	GatewayClassCiliumGatewayClassConfigsIndex = "gatewayClassCiliumGatewayClassConfigsIndex"
+
+	// Indexes TCPRoutes by all the backend Services referenced in the object.
+	BackendServiceTCPRouteIndex = "backendServiceTCPRouteIndex"
+
+	// Indexes TCPRoutes by all the Gateway parents referenced in the object.
+	GatewayTCPRouteIndex = "gatewayTCPRouteIndex"
+
+	// Indexes UDPRoutes by all the backend Services referenced in the object.
+	BackendServiceUDPRouteIndex = "backendServiceUDPRouteIndex"
+
+	// Indexes UDPRoutes by all the Gateway parents referenced in the object.
+	GatewayUDPRouteIndex = "gatewayUDPRouteIndex"
+
+	// Indexes ListenerSets by the parent Gateway referenced in the object.
+	ListenerSetGatewayIndex = "listenerSetGatewayIndex"
+
+	// Indexes HTTPRoutes by all the ListenerSet parents referenced in the object.
+	HTTPRouteListenerSetIndex = "listenerSetHTTPRouteIndex"
+
+	// Indexes GRPCRoutes by all the ListenerSet parents referenced in the object.
+	GRPCRouteListenerSetIndex = "listenerSetGRPCRouteIndex"
+
+	// Indexes TLSRoutes by all the ListenerSet parents referenced in the object.
+	TLSRouteListenerSetIndex = "listenerSetTLSRouteIndex"
+
+	// Indexes TCPRoutes by all the ListenerSet parents referenced in the object.
+	TCPRouteListenerSetIndex = "listenerSetTCPRouteIndex"
+
+	// Indexes UDPRoutes by all the ListenerSet parents referenced in the object.
+	UDPRouteListenerSetIndex = "listenerSetUDPRouteIndex"
 )

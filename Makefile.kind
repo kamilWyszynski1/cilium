@@ -181,8 +181,10 @@ PREPULL_IMAGES ?= quay.io/cilium/cilium-ci:latest  quay.io/cilium/operator-gener
 .PHONY: kind-load-base-images
 kind-load-base-images:
 	@echo "  PULL cluster images"
-	for image in $(PREPULL_IMAGES); do docker pull $$image; done
-	for cluster_name in $${KIND_CLUSTERS:-$(shell kind get clusters)}; do \
+	for image in $(PREPULL_IMAGES); do \
+		docker pull $$image || docker image inspect $$image >/dev/null 2>&1; \
+	done
+	for cluster_name in $${KIND_CLUSTERS:-$$(kind get clusters)}; do \
 		kind load docker-image $(PREPULL_IMAGES) -n $$cluster_name; \
 	done
 
@@ -384,6 +386,9 @@ kind-servicemesh-install-cilium: check_deps kind-ready ## Install a local Cilium
 	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_grpcroutes.yaml
 	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_backendtlspolicies.yaml
 	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_tlsroutes.yaml
+	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_listenersets.yaml
+	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_tcproutes.yaml
+	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_udproutes.yaml
 
 	$(CILIUM_CLI) install \
 		--chart-directory=$(ROOT_DIR)/install/kubernetes/cilium \
@@ -412,6 +417,9 @@ kind-servicemesh-prereqs: check_deps kind-ready
 	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_grpcroutes.yaml
 	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_backendtlspolicies.yaml
 	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_tlsroutes.yaml
+	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_listenersets.yaml
+	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_tcproutes.yaml
+	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$(GW_VERSION)/config/crd/$(GW_CHANNEL)/gateway.networking.k8s.io_udproutes.yaml
 
 	$(eval KIND_VALUES_FAST_FILES += --helm-values=$(ROOT_DIR)/contrib/testing/kind-servicemesh.yaml)
 
@@ -463,7 +471,7 @@ kind-kvstore-start: ## Start an etcd pod serving as Cilium's kvstore
 			--overrides='{ "apiVersion": "v1", "spec": { "hostNetwork": true, "nodeSelector": {"node-role.kubernetes.io/control-plane": ""},  "tolerations": [{ "operator": "Exists" }] }}' \
 			-- etcd --listen-client-urls=http://0.0.0.0:$(KVSTORE_POD_PORT) --advertise-client-urls=http://0.0.0.0:$(KVSTORE_POD_PORT)
 
-	kubectl --namespace kube-system wait --for=condition=Ready pod/$(KVSTORE_POD_NAME)
+	kubectl --namespace kube-system wait --for=condition=Ready pod/$(KVSTORE_POD_NAME) --timeout=300s
 
 .PHONY: kind-kvstore-stop
 kind-kvstore-stop: ## Stop the etcd pod serving as Cilium's kvstore

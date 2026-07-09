@@ -70,8 +70,8 @@ export CILIUM_CLI ?= cilium
 export KUBECTL ?= kubectl
 
 # renovate: datasource=docker depName=quay.io/goswagger/swagger
-SWAGGER_VERSION = 0.33.2
-SWAGGER_IMAGE_SHA = sha256:08b55fbcea59fa0d73f7f28258799ff199c3ae5dd0023b9d63cf88161a4b7a90
+SWAGGER_VERSION = 0.34.1
+SWAGGER_IMAGE_SHA = sha256:e4e89fcb84027a313d8d315a32cecaf2da76e2d8efb9546124082021b6e74389
 SWAGGER := $(CONTAINER_ENGINE) run -u $(shell id -u):$(shell id -g) --rm -v $(ROOT_DIR):$(ROOT_DIR) -w $(ROOT_DIR) --entrypoint swagger quay.io/goswagger/swagger:$(SWAGGER_VERSION)@$(SWAGGER_IMAGE_SHA)
 
 # go build/test/clean flags
@@ -131,14 +131,14 @@ ifneq ($(GOTEST_FORMATTER),cat)
 endif
 
 # renovate: datasource=docker depName=golangci/golangci-lint
-GOLANGCILINT_WANT_VERSION = v2.11.4
-GOLANGCILINT_IMAGE_SHA = sha256:67dfc9eeeb0eb13fc1a36329c2c378197dc561f1edf1a7792e3f771606bb0e15
+GOLANGCILINT_WANT_VERSION = v2.12.2
+GOLANGCILINT_IMAGE_SHA = sha256:5cceeef04e53efe1470638d4b4b4f5ceefd574955ab3941b2d9a68a8c9ad5240
 GOLANGCILINT_VERSION = $(shell golangci-lint version --short 2>/dev/null)
 
 VERSION = $(shell cat $(dir $(lastword $(MAKEFILE_LIST)))/VERSION)
 VERSION_MAJOR = $(shell cat $(dir $(lastword $(MAKEFILE_LIST)))/VERSION | cut -d. -f1)
 # Use git only if in a Git repo
-ifneq ($(wildcard $(dir $(lastword $(MAKEFILE_LIST)))/.git/HEAD),)
+ifneq ($(wildcard $(dir $(lastword $(MAKEFILE_LIST)))/.git),)
     GIT_VERSION = $(shell git show -s --format='format:%h %aI')
 else
     GIT_VERSION = $(shell cat 2>/dev/null $(ROOT_DIR)/GIT_VERSION)
@@ -204,9 +204,6 @@ GO_CLEAN_FLAGS += -mod=vendor
 
 CGO_ENABLED ?= 0
 
-# See https://pkg.go.dev/internal/goexperiment
-GOEXPERIMENT ?=
-
 # Support CGO cross-compiling for amd64 and arm64 targets
 GO_BUILD_ENV = CGO_ENABLED=$(CGO_ENABLED)
 CROSS_ARCH =
@@ -227,10 +224,6 @@ ifneq ($(GOOS),)
     GO_BUILD_ENV += GOOS=$(GOOS)
 endif
 
-ifneq ($(GOEXPERIMENT),)
-    GO_BUILD_ENV += GOEXPERIMENT=$(GOEXPERIMENT)
-endif
-
 ifneq ($(RACE),)
     GO_BUILD_FLAGS += -race
     GO_TEST_FLAGS += -race
@@ -247,11 +240,6 @@ endif
 
 ifneq ($(LOCKDEBUG),)
     GO_TAGS_FLAGS += lockdebug
-endif
-
-ifneq ($(findstring boringcrypto,$(GOEXPERIMENT)),)
-    CGO_ENABLED = 1
-    GO_BUILD_LDFLAGS += -linkmode external -extldflags "-static --enable-static-nss"
 endif
 
 GO_BUILD_FLAGS += -ldflags '$(GO_BUILD_LDFLAGS) $(EXTRA_GO_BUILD_LDFLAGS)' -tags=$(call join-with-comma,$(GO_TAGS_FLAGS)) $(EXTRA_GO_BUILD_FLAGS)

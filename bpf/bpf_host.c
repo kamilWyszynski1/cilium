@@ -109,15 +109,15 @@ static __always_inline int rewrite_dmac_to_host(struct __ctx_buff *ctx)
 
 #ifdef ENABLE_IPV6
 static __always_inline __u32
-resolve_srcid_ipv6(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
+resolve_srcid_ipv6(const struct __ctx_buff *ctx, const struct ipv6hdr *ip6,
 		   __u32 real_sec_identity, __u32 *ipcache_sec_identity)
 {
 	const struct remote_endpoint_info *info = NULL;
-	union v6addr *src;
+	const union v6addr *src;
 
 	/* Packets from the proxy will already have a real identity. */
 	if (identity_is_reserved(real_sec_identity)) {
-		src = (union v6addr *) &ip6->saddr;
+		src = (const union v6addr *)&ip6->saddr;
 		info = lookup_ip6_remote_endpoint(src, 0);
 		if (info) {
 			*ipcache_sec_identity = info->sec_identity;
@@ -134,7 +134,7 @@ resolve_srcid_ipv6(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
 				real_sec_identity = *ipcache_sec_identity;
 		}
 		cilium_dbg(ctx, info ? DBG_IP_ID_MAP_SUCCEED6 : DBG_IP_ID_MAP_FAILED6,
-			   ((__u32 *)src)[3], real_sec_identity);
+			   ((const __u32 *)src)[3], real_sec_identity);
 	}
 
 	return real_sec_identity;
@@ -315,7 +315,7 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
  * This must tailcall, as the decap could be for inner ipv6 or ipv4 making
  * the remaining path potentially erroneous.
  *
- * Perform this before the ENABLE_HOST_ROUTING check as the decap is not dependent
+ * Perform this before the BPF Host Routing check as the decap is not dependent
  * on this feature being enabled or not.
  */
 #ifdef ENABLE_SRV6
@@ -329,14 +329,24 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	}
 #endif /* ENABLE_SRV6 */
 
-#ifndef ENABLE_HOST_ROUTING
-	/* See the equivalent v4 path for comments */
-	if (!from_host)
-		return CTX_ACT_OK;
-#endif /* !ENABLE_HOST_ROUTING */
-
 	/* Lookup IPv6 address in list of local endpoints */
 	ep = lookup_ip6_endpoint(ip6);
+
+	/* Strict ingress encryption enforcement: drop cluster-internal pod
+	 * traffic that would reach a local pod from a netdev. Legitimate
+	 * decrypted traffic is delivered directly from cil_from_wireguard
+	 * via a bpf redirect or the stack.
+	 */
+	if (is_defined(ENABLE_WIREGUARD) && CONFIG(encryption_strict_ingress) &&
+	    !from_host && identity_is_cluster(secctx) &&
+	    !identity_is_remote_node(secctx) &&
+	    ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
+		return DROP_UNENCRYPTED_TRAFFIC;
+
+	/* See the equivalent v4 path for comments */
+	if (!from_host && !CONFIG(enable_bpf_host_routing))
+		return CTX_ACT_OK;
+
 	if (ep) {
 		/* Let through packets to the node-ip so they are
 		 * processed by the local ip stack.
@@ -344,9 +354,8 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 		if (ep->flags & ENDPOINT_MASK_HOST_DELIVERY)
 			return CTX_ACT_OK;
 
-#ifdef ENABLE_HOST_ROUTING
 		/* add L2 header for L2-less interface: */
-		if (!from_host && THIS_IS_L3_DEV) {
+		if (!from_host && CONFIG(enable_bpf_host_routing) && THIS_IS_L3_DEV) {
 			bool l2_hdr_required = true;
 
 			ret = maybe_add_l2_hdr(ctx, ep->ifindex, &l2_hdr_required);
@@ -357,7 +366,7 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 				l3_off += __ETH_HLEN;
 			}
 		}
-#endif
+
 		return ipv6_local_delivery(ctx, l3_off, secctx, magic, ep,
 					   METRIC_INGRESS, from_host, false);
 	}
@@ -560,7 +569,7 @@ handle_to_netdev_ipv6(struct __ctx_buff *ctx, bool is_from_proxy, __u32 src_sec_
 
 #ifdef ENABLE_IPV4
 static __always_inline __u32
-resolve_srcid_ipv4(struct __ctx_buff *ctx, struct iphdr *ip4,
+resolve_srcid_ipv4(const struct __ctx_buff *ctx, const struct iphdr *ip4,
 		   __u32 real_sec_identity, __u32 *ipcache_sec_identity)
 {
 	const struct remote_endpoint_info *info = NULL;
@@ -735,7 +744,20 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	}
 #endif /* ENABLE_HOST_FIREWALL */
 
-#ifndef ENABLE_HOST_ROUTING
+	/* Lookup IPv4 address in list of local endpoints and host IPs */
+	ep = lookup_ip4_endpoint(ip4);
+
+	/* Strict ingress encryption enforcement: drop cluster-internal pod
+	 * traffic that would reach a local pod from a netdev. Legitimate
+	 * decrypted traffic is delivered directly from cil_from_wireguard
+	 * via a bpf redirect or the stack.
+	 */
+	if (is_defined(ENABLE_WIREGUARD) && CONFIG(encryption_strict_ingress) &&
+	    !from_host && identity_is_cluster(secctx) &&
+	    !identity_is_remote_node(secctx) &&
+	    ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
+		return DROP_UNENCRYPTED_TRAFFIC;
+
 	/* Without bpf_redirect_neigh() helper, we cannot redirect a
 	 * packet to a local endpoint in the direct routing mode, as
 	 * the redirect bypasses nf_conntrack table. This makes a
@@ -745,12 +767,9 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	 * we bypass request and reply path in the host namespace and
 	 * do not run into this issue.
 	 */
-	if (!from_host)
+	if (!from_host && !CONFIG(enable_bpf_host_routing))
 		return CTX_ACT_OK;
-#endif /* !ENABLE_HOST_ROUTING */
 
-	/* Lookup IPv4 address in list of local endpoints and host IPs */
-	ep = lookup_ip4_endpoint(ip4);
 	if (ep) {
 		int l3_off = ETH_HLEN;
 
@@ -760,9 +779,8 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 		if (ep->flags & ENDPOINT_MASK_HOST_DELIVERY)
 			return CTX_ACT_OK;
 
-#ifdef ENABLE_HOST_ROUTING
 		/* add L2 header for L2-less interface: */
-		if (!from_host && THIS_IS_L3_DEV) {
+		if (!from_host && CONFIG(enable_bpf_host_routing) && THIS_IS_L3_DEV) {
 			bool l2_hdr_required = true;
 
 			ret = maybe_add_l2_hdr(ctx, ep->ifindex, &l2_hdr_required);
@@ -777,7 +795,6 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 					return DROP_INVALID;
 			}
 		}
-#endif
 
 		return ipv4_local_delivery(ctx, l3_off, secctx, magic, ip4, ep,
 					   METRIC_INGRESS, from_host, false, 0);
@@ -1052,6 +1069,42 @@ do_netdev(struct __ctx_buff *ctx, __be16 proto, __u32 identity,
 			}
 		}
 
+		/* IPv6-in-IPv6 IPIP termination, mirror of the v4 path
+		 * below; see that comment for the full rationale. Fires for
+		 * any local endpoint (pod or hostNetwork) outer dst, when the
+		 * outer's next header is IPV6 directly with no extension
+		 * headers (the DSR-IPIP encap path never inserts them).
+		 */
+		if (CONFIG(enable_ipip_termination) && !from_host &&
+		    ip6->nexthdr == NEXTHDR_IPV6) {
+			const struct endpoint_info *ep_outer;
+
+			ep_outer = lookup_ip6_endpoint(ip6);
+			if (ep_outer) {
+				union v6addr outer_dst;
+
+				ipv6_addr_copy(&outer_dst,
+					       (union v6addr *)&ip6->daddr);
+
+				if (ctx_adjust_hroom(ctx, -(int)sizeof(*ip6),
+						     BPF_ADJ_ROOM_MAC,
+						     ctx_adjust_hroom_flags())) {
+					ret = DROP_INVALID;
+					goto drop_err_ingress;
+				}
+				if (!revalidate_data_pull(ctx, &data, &data_end, &ip6)) {
+					ret = DROP_INVALID;
+					goto drop_err_ingress;
+				}
+				ctx_store_meta_ipv6(ctx, CB_FORCED_BACKEND_V6_1,
+						    &outer_dst);
+				/* See the IPv4 sibling block below for why we
+				 * have to clear the skip-nodeport flag here.
+				 */
+				ctx_skip_nodeport_clear(ctx);
+			}
+		}
+
 		identity = resolve_srcid_ipv6(ctx, ip6, identity, &ipcache_srcid);
 		ctx_store_meta(ctx, CB_SRC_LABEL, identity);
 
@@ -1067,7 +1120,6 @@ do_netdev(struct __ctx_buff *ctx, __be16 proto, __u32 identity,
 			if (likely(hdrlen > 0) &&
 			    ctx_is_wireguard(ctx, ETH_HLEN + hdrlen, next_proto, identity)) {
 				trace.reason = TRACE_REASON_ENCRYPTED;
-				set_decrypt_mark(ctx, 0);
 			}
 		}
 # endif /* ENABLE_WIREGUARD */
@@ -1093,6 +1145,59 @@ do_netdev(struct __ctx_buff *ctx, __be16 proto, __u32 identity,
 			goto drop_err_ingress;
 		}
 
+		/* Terminate inbound IPIP in BPF on netdev ingress for any
+		 * outer dst that resolves to a local endpoint:
+		 *
+		 *  - Pod outer dst: the kernel would otherwise route the still-
+		 *    encapped packet via the lxc into the Pod netns where it
+		 *    gets dropped (no IPIP handler in the container).
+		 *  - Host outer dst (hostNetwork backend, or --enable-ipip-
+		 *    termination Envoy target): the kernel would otherwise
+		 *    decap on cilium_ipip4 via the collect_md fallback. Doing
+		 *    it here keeps the input ifindex on the physical netdev
+		 *    and lets us drop the bpf_host attach to cilium_ipip{4,6}.
+		 *
+		 * Stash the LB-picked backend (the just-stripped outer dst)
+		 * so nodeport_lb4() honors it instead of re-running selection.
+		 * For L7-punt-proxy svcs the lb4_svc_is_l7_punt_proxy &&
+		 * backend_local gate downstream punts to host stack before
+		 * any DNAT, so Envoy interception still works.
+		 */
+		if (CONFIG(enable_ipip_termination) && !from_host &&
+		    ip4->protocol == IPPROTO_IPIP &&
+		    ipv4_hdrlen(ip4) == sizeof(*ip4)) {
+			const struct endpoint_info *ep_outer;
+
+			ep_outer = lookup_ip4_endpoint(ip4);
+			if (ep_outer) {
+				__be32 outer_dst = ip4->daddr;
+
+				if (ctx_adjust_hroom(ctx, -(int)sizeof(*ip4),
+						     BPF_ADJ_ROOM_MAC,
+						     ctx_adjust_hroom_flags())) {
+					ret = DROP_INVALID;
+					goto drop_err_ingress;
+				}
+				if (!revalidate_data_pull(ctx, &data, &data_end, &ip4)) {
+					ret = DROP_INVALID;
+					goto drop_err_ingress;
+				}
+				ctx_store_meta(ctx, CB_FORCED_BACKEND_V4, outer_dst);
+				/* If NodePort XDP acceleration ran upstream, it
+				 * couldn't classify the IPIP packet (no L4 to
+				 * extract a service tuple from) and signalled
+				 * XFER_PKT_NO_SVC. cil_from_netdev translated
+				 * that into a skip-nodeport hint via tc_index.
+				 * That hint was correct for the OUTER header but
+				 * is stale now: the inner is exactly the service
+				 * request that needs the forced-backend DNAT in
+				 * nodeport_svc_lb4(). Clear it so handle_ipv4()
+				 * runs nodeport_lb4().
+				 */
+				ctx_skip_nodeport_clear(ctx);
+			}
+		}
+
 		identity = resolve_srcid_ipv4(ctx, ip4, identity, &ipcache_srcid);
 		ctx_store_meta(ctx, CB_SRC_LABEL, identity);
 
@@ -1107,7 +1212,6 @@ do_netdev(struct __ctx_buff *ctx, __be16 proto, __u32 identity,
 			hdrlen = ipv4_hdrlen(ip4);
 			if (ctx_is_wireguard(ctx, ETH_HLEN + hdrlen, next_proto, identity)) {
 				trace.reason = TRACE_REASON_ENCRYPTED;
-				set_decrypt_mark(ctx, 0);
 			}
 		}
 #endif /* ENABLE_WIREGUARD */
@@ -1241,7 +1345,7 @@ int cil_from_netdev(struct __ctx_buff *ctx)
 #endif
 	ret = tcx_early_hook(ctx, proto);
 	if (ret != CTX_ACT_OK)
-		return ret;
+		goto drop_err;
 
 	return do_netdev(ctx, proto, UNKNOWN_ID, TRACE_FROM_NETWORK, false);
 drop_err:
@@ -1597,6 +1701,10 @@ int host_ingress_policy(struct __ctx_buff *ctx, __be16 proto,
 	};
 	int ret;
 
+	ret = pull_l3_hdr(ctx, proto);
+	if (ret < 0)
+		return ret;
+
 	switch (proto) {
 # ifdef ENABLE_IPV6
 	case bpf_htons(ETH_P_IPV6):
@@ -1883,7 +1991,7 @@ int cil_host_policy(struct __ctx_buff *ctx __maybe_unused)
 		if (IS_ERR(ret))
 			goto drop_err;
 
-		local_delivery_fill_meta(ctx, src_sec_identity, false,
+		local_delivery_fill_meta(ctx, src_sec_identity, false, false,
 					 true, false, 0);
 		ret = tail_call_policy(ctx, (__u16)lxc_id);
 	} else {

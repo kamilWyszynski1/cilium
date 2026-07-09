@@ -3,8 +3,8 @@
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
-ARG GOLANG_IMAGE=docker.io/library/golang:1.26.2@sha256:b54cbf583d390341599d7bcbc062425c081105cc5ef6d170ced98ef9d047c716
-ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04@sha256:186072bba1b2f436cbb91ef2567abca677337cfc786c86e107d25b7072feef0c
+ARG GOLANG_IMAGE=docker.io/library/golang:1.26.5@sha256:63f132d58c1f589f0dcda584933a9bb44bfda1150f1506377f5a902f34d86033
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 ARG CILIUM_LLVM_IMAGE=quay.io/cilium/cilium-llvm:19.1.7-1772622536-65b121f@sha256:4320b57bde46d6642efeb72e405f699a5e189f8377614900f58f54f2641afdf3
 ARG CILIUM_BPFTOOL_IMAGE=quay.io/cilium/cilium-bpftool:7.6.0-1772622536-65b121f@sha256:7bd6330b1d92eb1e923cd7d1ad44808ac7598b4661a6726fabf24407a95f5bde
@@ -17,16 +17,21 @@ FROM ${CILIUM_IPTABLES_IMAGE} AS iptables-dist
 FROM ${GOLANG_IMAGE} AS go-builder
 
 WORKDIR /go/src/github.com/cilium/cilium/images/runtime
+ARG TARGETARCH
 RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium/images/runtime \
     --mount=target=/root/.cache,type=cache \
     --mount=target=/go/pkg/mod,type=cache \
     ./build-gops.sh
 
-ARG TARGETARCH
 RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium/images/runtime \
     --mount=target=/root/.cache,type=cache \
     --mount=target=/go/pkg/mod,type=cache \
-    ./download-cni.sh
+    ./build-cni.sh
+
+RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium/images/runtime \
+    --mount=target=/root/.cache,type=cache \
+    --mount=target=/go/pkg/mod,type=cache \
+    ./build-iptables-wrapper.sh
 
 FROM ${UBUNTU_IMAGE} AS rootfs
 
@@ -46,12 +51,16 @@ RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium/images/r
 COPY --from=iptables-dist /iptables /iptables
 RUN dpkg -i /iptables/*\.deb && rm -rf /iptables
 
-RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium/images/runtime \
-    ./iptables-wrapper-installer.sh --no-sanity-check
+COPY --from=go-builder /out /
+
+# Symlink the iptables and ip6tables binaries to the iptables-wrapper binary.
+# On its first invocation the wrapper detects whether the host is using the
+# legacy or nft iptables backend and re-points these symlinks at the matching
+# backend before re-execing the original command.
+RUN /usr/sbin/iptables-wrapper install
 
 COPY --from=llvm-dist /usr/local/bin/clang /usr/local/bin/llc /usr/local/bin/
 COPY --from=bpftool-dist /usr/local/bin/bpftool /usr/local/bin/bpftool
-COPY --from=go-builder /out /
 
 FROM scratch
 LABEL maintainer="maintainer@cilium.io"

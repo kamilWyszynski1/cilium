@@ -29,6 +29,7 @@ func Endpoint(ep endpoint.Config, lnc *Config) any {
 	}
 
 	cfg.InterfaceIfIndex = uint32(ep.GetIfIndex())
+	cfg.DeviceMTU = uint16(lnc.DeviceMTU)
 
 	cfg.EndpointID = uint16(ep.GetID())
 	cfg.EndpointNetNSCookie = ep.GetEndpointNetNsCookie()
@@ -66,6 +67,8 @@ func Endpoint(ep endpoint.Config, lnc *Config) any {
 
 	cfg.EnableIPv4Fragments = option.Config.EnableIPv4FragmentsTracking
 	cfg.EnableIPv6Fragments = option.Config.EnableIPv6FragmentsTracking
+
+	cfg.HybridRoutingEnabled = option.Config.RoutingMode == option.RoutingModeHybrid
 
 	return cfg
 }

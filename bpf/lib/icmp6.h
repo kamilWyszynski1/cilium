@@ -8,6 +8,7 @@
 #include "icmp_wsum.h"
 #include "eth.h"
 #include "drop.h"
+#include "drop_reasons.h"
 #include "eps.h"
 
 #define ICMP6_TYPE_OFFSET offsetof(struct icmp6hdr, icmp6_type)
@@ -493,7 +494,7 @@ icmp6_host_handle(struct __ctx_buff *ctx, int l4_off, __s8 *ext_err, bool handle
 	 * |      ICMPv6-mult-list-done      |   CTX_ACT_OK    |  132 |
 	 * |      ICMPv6-router-solici       |   CTX_ACT_OK    |  133 |
 	 * |      ICMPv6-router-advert       |   CTX_ACT_OK    |  134 |
-	 * |     ICMPv6-neighbor-solicit     | icmp6_handle_ns |  135 |
+	 * |     ICMPv6-neighbor-solicit     |   CTX_ACT_OK    |  135 |
 	 * |      ICMPv6-neighbor-advert     |   CTX_ACT_OK    |  136 |
 	 * |     ICMPv6-redirect-message     |  CTX_ACT_DROP   |  137 |
 	 * |      ICMPv6-router-renumber     |   CTX_ACT_OK    |  138 |
@@ -520,9 +521,6 @@ icmp6_host_handle(struct __ctx_buff *ctx, int l4_off, __s8 *ext_err, bool handle
 	 * |       ICMPv6-unallocated        |  CTX_ACT_DROP   |      |
 	 * |       ICMPv6-unassigned         |  CTX_ACT_DROP   |      |
 	 */
-
-	if (type == ICMP6_NS_MSG_TYPE)
-		return CTX_ACT_OK;
 
 	if (type == ICMPV6_ECHO_REQUEST || type == ICMPV6_ECHO_REPLY)
 		/* Decision is deferred to the host policies. */

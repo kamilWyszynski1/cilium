@@ -167,7 +167,6 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 				})
 				testExternalTrafficPolicyLocal(kubectl, ni)
 				deploymentManager.DeleteAll()
-				deploymentManager.DeleteCilium()
 			})
 
 			It("with the host firewall and externalTrafficPolicy=Local", func() {
@@ -338,30 +337,6 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 			testSessionAffinity(kubectl, ni)
 		})
 
-		It("Tests GH#10983", func() {
-			var data v1.Service
-
-			// We need two NodePort services with the same single endpoint,
-			// so thus we choose the "test-nodeport{-local,}-k8s2" svc.
-			// Both svcs will be accessed via the k8s2 node, because
-			// "test-nodeport-local-k8s2" has the local external traffic
-			// policy.
-			err := kubectl.Get(helpers.DefaultNamespace, "svc test-nodeport-local-k8s2").Unmarshal(&data)
-			Expect(err).Should(BeNil(), "Can not retrieve service")
-			svc1URL := getHTTPLink(ni.K8s2IP, data.Spec.Ports[0].NodePort)
-			err = kubectl.Get(helpers.DefaultNamespace, "svc test-nodeport-k8s2").Unmarshal(&data)
-			Expect(err).Should(BeNil(), "Can not retrieve service")
-			svc2URL := getHTTPLink(ni.K8s2IP, data.Spec.Ports[0].NodePort)
-
-			// Send two requests from the same src IP and port to the endpoint
-			// via two different NodePort svc to trigger the stale conntrack
-			// entry issue. Once it's fixed, the second request should not
-			// fail.
-			testCurlFromOutsideWithLocalPort(kubectl, ni, svc1URL, 1, false, 64002)
-			time.Sleep(120 * time.Second) // to reuse the source port
-			testCurlFromOutsideWithLocalPort(kubectl, ni, svc2URL, 1, false, 64002)
-		})
-
 		It("Tests security id propagation in N/S LB requests fwd-ed over tunnel", func() {
 			// This test case checks whether the "wold" identity is passed in
 			// the encapsulated N/S LB requests which are forwarded to the node
@@ -419,7 +394,6 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 				"loadBalancer.mode":         "snat",
 				"loadBalancer.algorithm":    "maglev",
 				"l2NeighDiscovery.enabled":  "true",
-				"maglev.tableSize":          "251",
 				"routingMode":               "native",
 				"autoDirectNodeRoutes":      "true",
 				"devices":                   fmt.Sprintf(`'{%s}'`, ni.PrivateIface),
@@ -451,7 +425,6 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 				"loadBalancer.mode":         "hybrid",
 				"loadBalancer.algorithm":    "maglev",
 				"l2NeighDiscovery.enabled":  "true",
-				"maglev.tableSize":          "251",
 				"routingMode":               "native",
 				"autoDirectNodeRoutes":      "true",
 				"devices":                   fmt.Sprintf(`'{%s}'`, ni.PrivateIface),
@@ -481,7 +454,6 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 				"loadBalancer.mode":         "dsr",
 				"loadBalancer.algorithm":    "maglev",
 				"l2NeighDiscovery.enabled":  "true",
-				"maglev.tableSize":          "251",
 				"routingMode":               "native",
 				"autoDirectNodeRoutes":      "true",
 				"devices":                   fmt.Sprintf(`'{%s}'`, ni.PrivateIface),
@@ -498,7 +470,6 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 				"loadBalancer.mode":         "dsr",
 				"loadBalancer.algorithm":    "maglev",
 				"l2NeighDiscovery.enabled":  "true",
-				"maglev.tableSize":          "251",
 				"routingMode":               "native",
 				"tunnelProtocol":            "geneve",
 				"autoDirectNodeRoutes":      "true",
@@ -528,7 +499,6 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 				"loadBalancer.acceleration": "disabled",
 				"loadBalancer.mode":         "dsr",
 				"loadBalancer.algorithm":    "maglev",
-				"maglev.tableSize":          "251",
 				"routingMode":               "native",
 				"tunnelProtocol":            "geneve",
 				"autoDirectNodeRoutes":      "true",
@@ -557,7 +527,6 @@ var _ = SkipDescribeIf(helpers.RunsOn54Kernel, "K8sDatapathServicesTest", func()
 				"loadBalancer.acceleration": "disabled",
 				"loadBalancer.mode":         "dsr",
 				"loadBalancer.algorithm":    "maglev",
-				"maglev.tableSize":          "251",
 				"tunnelProtocol":            "geneve",
 				"loadBalancer.dsrDispatch":  "geneve",
 				"devices":                   "'{}'", // Revert back to auto-detection after XDP.

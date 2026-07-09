@@ -39,6 +39,10 @@ import (
 )
 
 // Cell manages the Gateway API related controllers.
+const (
+	defaultControllerName = "io.cilium/gateway-controller"
+)
+
 var Cell = cell.Module(
 	"gateway-api",
 	"Manages the Gateway API controllers",
@@ -54,6 +58,7 @@ var Cell = cell.Module(
 
 		GatewayAPIHostnetworkEnabled:           false,
 		GatewayAPIHostnetworkNodelabelselector: "",
+		GatewayAPIUseRemoteAddress:             true,
 	}),
 
 	// Private provider for preconditions - consumed by both initGatewayAPIController
@@ -70,8 +75,8 @@ var Cell = cell.Module(
 type gatewayAPIPreconditions struct {
 	// Enabled indicates all preconditions are met for Gateway API
 	Enabled bool
-	// InstalledKinds contains the GVKs of installed Gateway API CRDs
-	InstalledKinds []schema.GroupVersionKind
+	// InstalledOptionalKinds contains the GVKs of installed Gateway API CRDs
+	InstalledOptionalKinds []schema.GroupVersionKind
 }
 
 // preconditionParams contains dependencies for checking Gateway API preconditions.
@@ -134,12 +139,12 @@ func discoverCRDsWithRetry(ctx context.Context, client k8sClient.Clientset, logg
 	}
 
 	for {
-		installedKinds, err := checkCRDs(ctx, client, logger, helpers.RequiredGVKs, helpers.AllOptionalKinds)
+		installedOptionalKinds, err := checkCRDs(ctx, client, logger, helpers.RequiredGVKs, helpers.AllOptionalKinds)
 		if err == nil {
 			health.OK("Gateway API CRDs discovered")
 			return &gatewayAPIPreconditions{
-				Enabled:        true,
-				InstalledKinds: installedKinds,
+				Enabled:                true,
+				InstalledOptionalKinds: installedOptionalKinds,
 			}, nil
 		}
 
@@ -192,6 +197,7 @@ type gatewayApiConfig struct {
 
 	GatewayAPIHostnetworkEnabled           bool
 	GatewayAPIHostnetworkNodelabelselector string
+	GatewayAPIUseRemoteAddress             bool
 }
 
 func (r gatewayApiConfig) Flags(flags *pflag.FlagSet) {
@@ -203,6 +209,7 @@ func (r gatewayApiConfig) Flags(flags *pflag.FlagSet) {
 	flags.String("gateway-api-service-externaltrafficpolicy", r.GatewayAPIServiceExternalTrafficPolicy, "Kubernetes LoadBalancer Service externalTrafficPolicy for all Gateway instances.")
 	flags.String("gateway-api-secrets-namespace", r.GatewayAPISecretsNamespace, "Namespace having tls secrets used by CEC for Gateway API")
 	flags.Bool("gateway-api-hostnetwork-enabled", r.GatewayAPIHostnetworkEnabled, "Exposes Gateway listeners on the host network.")
+	flags.Bool("gateway-api-use-remote-address", r.GatewayAPIUseRemoteAddress, "Use the immediate client's IP address as the origin client's IP address")
 	flags.String("gateway-api-hostnetwork-nodelabelselector", r.GatewayAPIHostnetworkNodelabelselector, "Label selector that matches the nodes where the gateway listeners should be exposed. It's a list of comma-separated key-value label pairs. e.g. 'kubernetes.io/os=linux,kubernetes.io/hostname=kind-worker'")
 }
 
@@ -228,15 +235,15 @@ func initGatewayAPIController(params gatewayAPIParams) error {
 		return nil
 	}
 
-	installedKinds := params.Preconditions.InstalledKinds
+	installedOptionalKinds := params.Preconditions.InstalledOptionalKinds
 
 	// Handle MCS API CRDs
-	if params.MCSAPIConfig.ShouldInstallMCSAPICrds() && !slices.Contains(installedKinds, mcsapiv1beta1.SchemeGroupVersion.WithKind(helpers.ServiceImportKind)) {
+	if params.MCSAPIConfig.ShouldInstallMCSAPICrds() && !slices.Contains(installedOptionalKinds, mcsapiv1beta1.SchemeGroupVersion.WithKind(helpers.ServiceImportKind)) {
 		// We can just assume ServiceImport are installed if we are going to install it
-		installedKinds = append(installedKinds, mcsapiv1beta1.SchemeGroupVersion.WithKind(helpers.ServiceImportKind))
+		installedOptionalKinds = append(installedOptionalKinds, mcsapiv1beta1.SchemeGroupVersion.WithKind(helpers.ServiceImportKind))
 	}
 
-	if err := registerGatewayAPITypesToScheme(params.Scheme, installedKinds); err != nil {
+	if err := registerGatewayAPITypesToScheme(params.Scheme, installedOptionalKinds); err != nil {
 		return err
 	}
 
@@ -271,6 +278,7 @@ func initGatewayAPIController(params gatewayAPIParams) error {
 		},
 		OriginalIPDetectionConfig: translation.OriginalIPDetectionConfig{
 			XFFNumTrustedHops: params.GatewayApiConfig.GatewayAPIXffNumTrustedHops,
+			UseRemoteAddress:  params.GatewayApiConfig.GatewayAPIUseRemoteAddress,
 		},
 	}
 	cecTranslator := translation.NewCECTranslator(cfg)
@@ -281,7 +289,8 @@ func initGatewayAPIController(params gatewayAPIParams) error {
 		params.CtrlRuntimeManager,
 		gatewayAPITranslator,
 		params.Logger,
-		installedKinds,
+		defaultControllerName,
+		installedOptionalKinds,
 	); err != nil {
 		return fmt.Errorf("failed to create gateway controller: %w", err)
 	}
@@ -312,17 +321,19 @@ func registerSecretSync(params secretSyncParams) secretsync.SecretSyncRegistrati
 		return secretsync.SecretSyncRegistrationOut{}
 	}
 
+	handler := NewSecretSyncHandler(params.CtrlRuntimeManager.GetClient(), params.Logger, defaultControllerName)
+
 	return secretsync.SecretSyncRegistrationOut{
 		SecretSyncRegistration: &secretsync.SecretSyncRegistration{
 			RefObject:            &gatewayv1.Gateway{},
-			RefObjectEnqueueFunc: EnqueueTLSSecrets(params.CtrlRuntimeManager.GetClient(), params.Logger),
-			RefObjectCheckFunc:   IsReferencedByCiliumGateway,
+			RefObjectEnqueueFunc: handler.EnqueueTLSSecrets(),
+			RefObjectCheckFunc:   handler.IsReferencedByGateway,
 			SecretsNamespace:     params.GatewayApiConfig.GatewayAPISecretsNamespace,
 		},
 		ConfigMapSyncRegistration: &secretsync.ConfigMapSyncRegistration{
 			RefObject:            &gatewayv1.BackendTLSPolicy{},
-			RefObjectEnqueueFunc: EnqueueBackendTLSPolicyConfigMaps(params.CtrlRuntimeManager.GetClient(), params.Logger),
-			RefObjectCheckFunc:   ConfigMapIsReferencedInCiliumGateway,
+			RefObjectEnqueueFunc: handler.EnqueueBackendTLSPolicyConfigMaps(),
+			RefObjectCheckFunc:   handler.ConfigMapIsReferencedInGateway,
 			SecretsNamespace:     params.GatewayApiConfig.GatewayAPISecretsNamespace,
 		},
 	}
@@ -396,7 +407,7 @@ func checkCRD(ctx context.Context, clientset k8sClient.Clientset, gvk schema.Gro
 // schema.GroupVersionKind of any optional CRDs that are installed.
 func checkCRDs(ctx context.Context, clientset k8sClient.Clientset, logger *slog.Logger, requiredGVKs, optionalGVKs []schema.GroupVersionKind) ([]schema.GroupVersionKind, error) {
 	var res error
-	var presentGVKs []schema.GroupVersionKind
+	var presentOptionalGVKs []schema.GroupVersionKind
 
 	for _, gvk := range requiredGVKs {
 		if err := checkCRD(ctx, clientset, gvk); err != nil {
@@ -411,22 +422,23 @@ func checkCRDs(ctx context.Context, clientset k8sClient.Clientset, logger *slog.
 		}
 		// note that the .Kind field contains the _resource_ name -
 		// the plural, lowercase version of the name.
-		presentGVKs = append(presentGVKs, optionalGVK)
+		presentOptionalGVKs = append(presentOptionalGVKs, optionalGVK)
 	}
 
-	return presentGVKs, res
+	return presentOptionalGVKs, res
 }
 
 // registerReconcilers registers Gateway API reconcilers to the controller-runtime library manager.
 // optionalKinds are previously autodetected based on what CRDs are present in the cluster.
-func registerReconcilers(mgr ctrlRuntime.Manager, translator translation.Translator, logger *slog.Logger, installedCRDs []schema.GroupVersionKind) error {
+func registerReconcilers(mgr ctrlRuntime.Manager, translator translation.Translator, logger *slog.Logger, controllerName string, installedOptionalCRDs []schema.GroupVersionKind) error {
 	requiredReconcilers := []interface {
 		SetupWithManager(mgr ctrlRuntime.Manager) error
 	}{
-		newGatewayClassReconciler(mgr, logger),
-		newGatewayReconciler(mgr, translator, logger, installedCRDs),
-		newGammaReconciler(mgr, translator, logger),
+		newGatewayClassReconciler(mgr, logger, controllerName),
+		newGatewayReconciler(mgr, translator, logger, controllerName),
+		newGammaReconciler(mgr, translator, logger, controllerName),
 		newGatewayClassConfigReconciler(mgr, logger),
+		newEndpointSliceReconciler(mgr, logger),
 	}
 
 	for _, r := range requiredReconcilers {
@@ -439,12 +451,20 @@ func registerReconcilers(mgr ctrlRuntime.Manager, translator translation.Transla
 	// the optionalGVKs global.
 	// Note that optionalKinds contains the lower-case, plural version of the
 	// name.
-	for _, gvk := range installedCRDs {
+	for _, gvk := range installedOptionalCRDs {
 		switch gvk.Kind {
-		case helpers.TLSRouteKind:
-			// TLSRoute is reconciled by the Gateway API reconciler, but log that the
+		case helpers.TCPRouteKind:
+			// TCPRoute is reconciled by the Gateway API reconciler, but log that the
 			// support has been successfully enabled.
-			logger.Info("TLSRoute CRD is installed, TLSRoute support is enabled")
+			logger.Info("TCPRoute CRD is installed, TCPRoute support is enabled")
+		case helpers.UDPRouteKind:
+			// UDPRoute is reconciled by the Gateway API reconciler, but log that the
+			// support has been successfully enabled.
+			logger.Info("UDPRoute CRD is installed, UDPRoute support is enabled")
+		case helpers.ListenerSetKind:
+			// ListenerSet is reconciled by the Gateway API reconciler, but log that the
+			// support has been successfully enabled.
+			logger.Info("ListenerSet CRD is installed, ListenerSet support is enabled")
 		case helpers.ServiceImportKind:
 			// we don't need a reconciler, but we do need to tell folks that the
 			// support is working.
@@ -463,11 +483,22 @@ func registerGatewayAPITypesToScheme(scheme *runtime.Scheme, optionalKinds []sch
 
 	addToSchema := make(map[fmt.Stringer]func(s *runtime.Scheme) error)
 
-	// We can safely install the GA resources
-	addToSchema[gatewayv1.GroupVersion] = gatewayv1.AddToScheme
+	// Install all required GVKs.
+	for _, gvk := range helpers.RequiredGVKs {
+		addToSchema[gvk] = func(s *runtime.Scheme) error {
+			s.AddKnownTypes(
+				gvk.GroupVersion(),
+				helpers.GetConcreteObject(gvk),
+				helpers.GetConcreteListObject(gvk),
+			)
+			metav1.AddToGroupVersion(s, gvk.GroupVersion())
+			return nil
+		}
+	}
+
 	// We can also safely install the v1beta1 resources, as these are legacy
 	// and also included in the Standard install
-	addToSchema[gatewayv1beta1.GroupVersion] = gatewayv1beta1.AddToScheme
+	addToSchema[gatewayv1beta1.GroupVersion] = gatewayv1beta1.Install
 
 	for _, optionalKind := range optionalKinds {
 		// Note that we're using the full GVK as the map key here - this is fine
@@ -478,15 +509,11 @@ func registerGatewayAPITypesToScheme(scheme *runtime.Scheme, optionalKinds []sch
 		// AddToScheme, but we can't use that here because we want to only
 		// enable things on a per-resource basis.
 		addToSchema[optionalKind] = func(s *runtime.Scheme) error {
-			s.AddKnownTypes(optionalKind.GroupVersion(), helpers.GetConcreteObject(optionalKind))
-			// We also need to add the List version to the Schema
-			listKind := optionalKind.Kind[:len(optionalKind.Kind)-1] + "lists"
-			optionalKindList := schema.GroupVersionKind{
-				Group:   optionalKind.Group,
-				Version: optionalKind.Version,
-				Kind:    listKind,
-			}
-			s.AddKnownTypes(optionalKind.GroupVersion(), helpers.GetConcreteObject(optionalKindList))
+			s.AddKnownTypes(
+				optionalKind.GroupVersion(),
+				helpers.GetConcreteObject(optionalKind),
+				helpers.GetConcreteListObject(optionalKind),
+			)
 			metav1.AddToGroupVersion(s, optionalKind.GroupVersion())
 			return nil
 		}

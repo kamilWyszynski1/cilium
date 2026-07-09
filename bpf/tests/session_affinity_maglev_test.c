@@ -14,9 +14,6 @@
 #define TEST_REVNAT		       1
 #define LB_MAGLEV_EXTERNAL
 
-/* Skip ingress policy checks, not needed to validate hairpin flow */
-#define USE_BPF_PROG_FOR_INGRESS_POLICY
-
 #define CLIENT_ID1    1
 #define CLIENT_ID2    2
 #define CLIENT_IP1    v4_ext_one
@@ -44,10 +41,9 @@ static volatile const __u8 base_backend_mac[ETH_ALEN] = {
 
 #include "node_config.h"
 
-#undef LB_SELECTION
-#define LB_SELECTION LB_SELECTION_MAGLEV
 #undef LB_MAGLEV_LUT_SIZE
 #define LB_MAGLEV_LUT_SIZE 20
+#define LB_DEFAULT_ALG LB_SELECTION_MAGLEV
 
 /* Define a mock maglev map that would be used by the LB code */
 struct lb6_maglev_map_inner {
@@ -127,6 +123,7 @@ long mock_fib_lookup(__maybe_unused void *ctx, struct bpf_fib_lookup *params,
 /* Set port ranges to have deterministic source port selection */
 #include "nodeport_defaults.h"
 
+ASSIGN_CONFIG(bool, enable_endpoint_routes, true)
 ASSIGN_CONFIG(__u32, hash_init4_seed, 0xcafe)
 ASSIGN_CONFIG(__u32, hash_init6_seed, 0xeb9f)
 

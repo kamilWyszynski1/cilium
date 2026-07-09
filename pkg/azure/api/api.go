@@ -16,12 +16,13 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
 	"k8s.io/apimachinery/pkg/util/rand"
 
 	"github.com/cilium/cilium/pkg/api/helpers"
 	"github.com/cilium/cilium/pkg/azure/types"
+	iputil "github.com/cilium/cilium/pkg/ip"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/spanstat"
@@ -33,11 +34,12 @@ const (
 	interfacesGet                   = "Interfaces.Get"
 	interfacesList                  = "Interfaces.List"
 	publicIPPrefixesList            = "PublicIPPrefixes.List"
+	publicIPAddressesGet            = "PublicIPAddresses.Get"
+	publicIPAddressesListVMSS       = "PublicIPAddresses.ListVirtualMachineScaleSetVMPublicIPAddresses"
 	virtualMachinesGet              = "VirtualMachines.Get"
 	virtualMachineScaleSetsList     = "VirtualMachineScaleSets.List"
 	virtualMachineScaleSetVMsGet    = "VirtualMachineScaleSetVMs.Get"
 	virtualMachineScaleSetVMsUpdate = "VirtualMachineScaleSetVMs.Update"
-	virtualNetworksListAll          = "VirtualNetworks.ListAll"
 	subnetsGet                      = "Subnets.Get"
 
 	interfacesListVirtualMachineScaleSetNetworkInterfaces   = "Interfaces.ListVirtualMachineScaleSetNetworkInterfaces"
@@ -51,7 +53,7 @@ type Client struct {
 	resourceGroup             string
 	interfaces                *armnetwork.InterfacesClient
 	publicIPPrefixes          *armnetwork.PublicIPPrefixesClient
-	virtualNetworks           *armnetwork.VirtualNetworksClient
+	publicIPAddresses         *armnetwork.PublicIPAddressesClient
 	virtualMachines           *armcompute.VirtualMachinesClient
 	subnets                   *armnetwork.SubnetsClient
 	virtualMachineScaleSetVMs *armcompute.VirtualMachineScaleSetVMsClient
@@ -131,11 +133,6 @@ func NewClient(logger *slog.Logger, cloudName, subscriptionID, resourceGroup, us
 		return nil, err
 	}
 
-	virtualNetworksClient, err := armnetwork.NewVirtualNetworksClient(subscriptionID, credential, armClientOptions)
-	if err != nil {
-		return nil, err
-	}
-
 	virtualMachinesClient, err := armcompute.NewVirtualMachinesClient(subscriptionID, credential, armClientOptions)
 	if err != nil {
 		return nil, err
@@ -161,13 +158,18 @@ func NewClient(logger *slog.Logger, cloudName, subscriptionID, resourceGroup, us
 		return nil, err
 	}
 
+	publicIPAddressesClient, err := armnetwork.NewPublicIPAddressesClient(subscriptionID, credential, armClientOptions)
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Client{
 		logger:                    logger,
 		subscriptionID:            subscriptionID,
 		resourceGroup:             resourceGroup,
 		interfaces:                interfacesClient,
 		publicIPPrefixes:          publicIPPrefixesClient,
-		virtualNetworks:           virtualNetworksClient,
+		publicIPAddresses:         publicIPAddressesClient,
 		virtualMachines:           virtualMachinesClient,
 		subnets:                   subnetsClient,
 		virtualMachineScaleSetVMs: virtualMachineScaleSetVMsClient,
@@ -219,6 +221,13 @@ func (c *Client) listVirtualMachineScaleSetsNetworkInterfaces(ctx context.Contex
 	}
 
 	for _, virtualMachineScaleSet := range virtualMachineScaleSets {
+		// Skip scale sets known to be empty: AKS node pools scaled to zero
+		// surface as 0-capacity here and would otherwise cost an ARM call
+		// that returns 404.
+		if virtualMachineScaleSet.SKU != nil && virtualMachineScaleSet.SKU.Capacity != nil && *virtualMachineScaleSet.SKU.Capacity == 0 {
+			continue
+		}
+
 		virtualMachineScaleSetNetworkInterfaces, err := c.listVirtualMachineScaleSetNetworkInterfaces(ctx, *virtualMachineScaleSet.Name)
 		if err != nil {
 			// For scale set created by AKS node group (otherwise it will return an empty list) without any instances API will return not found. Then it can be skipped.
@@ -303,7 +312,7 @@ func (c *Client) listVirtualMachineScaleSetVMNetworkInterfaces(ctx context.Conte
 
 // parseInterfaces parses a armnetwork.Interface as returned by the Azure API
 // converts it into a types.AzureInterface
-func parseInterface(iface *armnetwork.Interface, subnets ipamTypes.SubnetMap, usePrimary bool) (instanceID string, i *types.AzureInterface) {
+func parseInterface(logger *slog.Logger, iface *armnetwork.Interface, subnets ipamTypes.SubnetMap, usePrimary bool) (instanceID string, i *types.AzureInterface) {
 	i = &types.AzureInterface{}
 
 	if iface.Properties.VirtualMachine != nil && iface.Properties.VirtualMachine.ID != nil {
@@ -330,28 +339,51 @@ func parseInterface(iface *armnetwork.Interface, subnets ipamTypes.SubnetMap, us
 	}
 
 	if iface.Properties.IPConfigurations != nil {
-		for _, ip := range (*iface).Properties.IPConfigurations {
-			if !usePrimary && ip.Properties.Primary != nil && *ip.Properties.Primary {
+		for _, ip := range iface.Properties.IPConfigurations {
+			if ip.Properties.PrivateIPAddress == nil {
 				continue
 			}
-			if ip.Properties.PrivateIPAddress != nil {
-				addr := types.AzureAddress{
-					IP:    *ip.Properties.PrivateIPAddress,
-					State: strings.ToLower(string(*ip.Properties.ProvisioningState)),
-				}
 
-				if ip.Properties.Subnet != nil {
-					addr.Subnet = *ip.Properties.Subnet.ID
-					if subnet, ok := subnets[addr.Subnet]; ok {
-						if subnet.CIDR.IsValid() {
-							i.CIDR = subnet.CIDR.String()
-						}
-						i.Gateway = deriveGatewayIP(subnet.CIDR.Addr())
+			// Azure enforces one subnet per NIC, so record it once. Doing
+			// this before the primary-skip below also covers NICs whose only
+			// IPConfig is the primary.
+			if ip.Properties.Subnet != nil && i.Subnet.ID == "" {
+				i.Subnet.ID = *ip.Properties.Subnet.ID
+				if subnet, ok := subnets[i.Subnet.ID]; ok {
+					if subnet.CIDR.IsValid() {
+						i.Subnet.CIDR = iputil.PrefixFrom(subnet.CIDR)
+						i.CIDR = i.Subnet.CIDR //nolint:staticcheck // transitional, see https://github.com/cilium/cilium/issues/46074
 					}
+					i.Gateway = deriveGatewayIP(subnet.CIDR.Addr())
 				}
-
-				i.Addresses = append(i.Addresses, addr)
 			}
+
+			parsedIP, err := netip.ParseAddr(*ip.Properties.PrivateIPAddress)
+			if err != nil {
+				logger.Warn(
+					"Ignoring IP configuration with unparseable PrivateIPAddress",
+					logfields.IPAddr, *ip.Properties.PrivateIPAddress,
+					logfields.Interface, i.ID,
+					logfields.Error, err,
+				)
+				continue
+			}
+			isPrimary := ip.Properties.Primary != nil && *ip.Properties.Primary
+			if isPrimary {
+				i.IP = iputil.AddrFrom(parsedIP)
+				if !usePrimary {
+					continue
+				}
+			}
+
+			addr := types.AzureAddress{
+				IP:    iputil.AddrFrom(parsedIP),
+				State: strings.ToLower(string(*ip.Properties.ProvisioningState)),
+			}
+			if ip.Properties.Subnet != nil {
+				addr.Subnet = *ip.Properties.Subnet.ID //nolint:staticcheck // transitional, see https://github.com/cilium/cilium/issues/46074
+			}
+			i.Addresses = append(i.Addresses, addr)
 		}
 	}
 
@@ -361,19 +393,8 @@ func parseInterface(iface *armnetwork.Interface, subnets ipamTypes.SubnetMap, us
 // deriveGatewayIP finds the default gateway for a given Azure subnet.
 // inspired by pkg/ipam/crd.go (as AWS, Azure reserves the first subnet IP for the gw).
 // Ref: https://docs.microsoft.com/en-us/azure/virtual-network/virtual-networks-faq#are-there-any-restrictions-on-using-ip-addresses-within-these-subnets
-func deriveGatewayIP(subnetIP netip.Addr) string {
-	return subnetIP.Next().String()
-}
-
-// GetInstances returns the list of all instances including all attached
-// interfaces as instanceMap
-func (c *Client) GetInstances(ctx context.Context, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error) {
-	networkInterfaces, err := c.ListAllNetworkInterfaces(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	return c.ParseInterfacesIntoInstanceMap(networkInterfaces, subnets), nil
+func deriveGatewayIP(subnetIP netip.Addr) iputil.Addr {
+	return iputil.AddrFrom(subnetIP.Next())
 }
 
 // ListAllNetworkInterfaces returns all network interfaces in the resource group
@@ -399,30 +420,12 @@ func (c *Client) ParseInterfacesIntoInstanceMap(networkInterfaces []*armnetwork.
 	instances := ipamTypes.NewInstanceMap()
 
 	for _, iface := range networkInterfaces {
-		if instanceID, azureInterface := parseInterface(iface, subnets, c.usePrimary); instanceID != "" {
+		if instanceID, azureInterface := parseInterface(c.logger, iface, subnets, c.usePrimary); instanceID != "" {
 			instances.Update(instanceID, azureInterface)
 		}
 	}
 
 	return instances
-}
-
-// GetInstance returns the interfaces of a given instance
-func (c *Client) GetInstance(ctx context.Context, subnets ipamTypes.SubnetMap, instanceID string) (*ipamTypes.Instance, error) {
-	resourceID, err := arm.ParseResourceID(instanceID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse instance ID %q", instanceID)
-	}
-	if strings.ToLower(resourceID.ResourceType.Type) != "virtualmachinescalesets/virtualmachines" {
-		return nil, fmt.Errorf("instance %q is not a virtual machine scale set instance", instanceID)
-	}
-
-	networkInterfaces, err := c.listVirtualMachineScaleSetVMNetworkInterfaces(ctx, resourceID.Parent.Name, resourceID.Name)
-	if err != nil {
-		return nil, err
-	}
-
-	return c.ParseInterfacesIntoInstance(networkInterfaces, subnets), nil
 }
 
 // ListVMNetworkInterfaces returns all network interfaces for a specific VMSS instance
@@ -447,61 +450,11 @@ func (c *Client) ParseInterfacesIntoInstance(networkInterfaces []*armnetwork.Int
 	instance.Interfaces = map[string]ipamTypes.Interface{}
 
 	for _, networkInterface := range networkInterfaces {
-		_, azureInterface := parseInterface(networkInterface, subnets, c.usePrimary)
+		_, azureInterface := parseInterface(c.logger, networkInterface, subnets, c.usePrimary)
 		instance.Interfaces[azureInterface.ID] = azureInterface
 	}
 
 	return &instance
-}
-
-// listAllVPCs lists all VPCs
-func (c *Client) listAllVPCs(ctx context.Context) (vpcs []*armnetwork.VirtualNetwork, err error) {
-	c.limiter.Limit(ctx, virtualNetworksListAll)
-	sinceStart := spanstat.Start()
-
-	// Note: lists all VPCs, not just those in c.resourcegroup
-	pager := c.virtualNetworks.NewListAllPager(nil)
-
-	defer func() {
-		c.metricsAPI.ObserveAPICall(virtualNetworksListAll, deriveStatus(err), sinceStart.Seconds())
-	}()
-
-	for pager.More() {
-		nextResult, err := pager.NextPage(ctx)
-		if err != nil {
-			return nil, err
-		}
-		vpcs = append(vpcs, nextResult.Value...)
-	}
-
-	return vpcs, nil
-}
-
-func parseSubnet(subnet *armnetwork.Subnet) (s *ipamTypes.Subnet) {
-	s = &ipamTypes.Subnet{ID: *subnet.ID}
-	if subnet.Name != nil {
-		s.Name = *subnet.Name
-	}
-
-	if subnet.Properties.AddressPrefix != nil {
-		cidr, err := netip.ParsePrefix(*subnet.Properties.AddressPrefix)
-		if err != nil {
-			return nil
-		}
-		s.CIDR = cidr
-		if subnet.Properties.IPConfigurations != nil {
-			s.AvailableAddresses = availableIPs(cidr) - len(subnet.Properties.IPConfigurations)
-		} else {
-			// Azure currently returns nil for subnet IPConfigs if the subnet has a large number of existing IPConfigs.
-			// API / SDK is supposed to return a IpConfigurationsNextLink which can be used to make an additional
-			// call to get all IPConfigs. This field however seems to be missing from the API spec.
-			// Since we cannot fall back to other subnets anyway, assume all IPs are available.
-			// TODO: Update this once azure-sdk-for-go supports ipConfigurationsNextLink
-			s.AvailableAddresses = availableIPs(cidr)
-		}
-	}
-
-	return
 }
 
 // availableIPs returns the number of IPs available in a CIDR
@@ -509,39 +462,6 @@ func availableIPs(p netip.Prefix) int {
 	ones := p.Bits()
 	bits := p.Addr().BitLen()
 	return 1 << (bits - ones)
-}
-
-// GetVpcsAndSubnets retrieves and returns all Vpcs
-func (c *Client) GetVpcsAndSubnets(ctx context.Context) (ipamTypes.VirtualNetworkMap, ipamTypes.SubnetMap, error) {
-	vpcs := ipamTypes.VirtualNetworkMap{}
-	subnets := ipamTypes.SubnetMap{}
-
-	vpcList, err := c.listAllVPCs(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	for _, v := range vpcList {
-		if v.ID == nil {
-			continue
-		}
-
-		vpc := &ipamTypes.VirtualNetwork{ID: *v.ID}
-		vpcs[vpc.ID] = vpc
-
-		if v.Properties.Subnets != nil {
-			for _, subnet := range v.Properties.Subnets {
-				if subnet.ID == nil {
-					continue
-				}
-				if s := parseSubnet(subnet); s != nil {
-					subnets[*subnet.ID] = s
-				}
-			}
-		}
-	}
-
-	return vpcs, subnets, nil
 }
 
 // parseSubnetID extracts resource group, virtual network, and subnet names from an Azure subnet ID.
@@ -832,15 +752,102 @@ func (c *Client) AssignPrivateIpAddressesVM(ctx context.Context, subnetID, inter
 	return nil
 }
 
+// getVMSSPublicIP returns the public IP address assigned to the primary NIC of a VMSS VM instance.
+// It lists the instance's NICs to locate the primary IP configuration, then queries the Azure
+// public IP addresses API scoped to that VMSS VM.
+func (c *Client) getVMSSPublicIP(ctx context.Context, vmssName, instanceNum string) (ip netip.Addr, err error) {
+	nics, err := c.listVirtualMachineScaleSetVMNetworkInterfaces(ctx, vmssName, instanceNum)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to list NICs for instance %s in VMSS %s: %w", instanceNum, vmssName, err)
+	}
+
+	var primaryNICName, primaryIPConfigName string
+	for _, nic := range nics {
+		if nic.Properties == nil || nic.Properties.Primary == nil || !*nic.Properties.Primary || nic.Name == nil {
+			continue
+		}
+		primaryNICName = *nic.Name
+		for _, ipConfig := range nic.Properties.IPConfigurations {
+			if ipConfig.Properties == nil || ipConfig.Properties.Primary == nil || !*ipConfig.Properties.Primary || ipConfig.Name == nil {
+				continue
+			}
+			primaryIPConfigName = *ipConfig.Name
+			break
+		}
+		break
+	}
+
+	if primaryNICName == "" {
+		return netip.Addr{}, fmt.Errorf("no primary NIC found for instance %s in VMSS %s", instanceNum, vmssName)
+	}
+	if primaryIPConfigName == "" {
+		return netip.Addr{}, fmt.Errorf("no primary IP configuration found on NIC %s for instance %s in VMSS %s", primaryNICName, instanceNum, vmssName)
+	}
+
+	c.limiter.Limit(ctx, publicIPAddressesListVMSS)
+	sinceStart := spanstat.Start()
+	pager := c.publicIPAddresses.NewListVirtualMachineScaleSetVMPublicIPAddressesPager(c.resourceGroup, vmssName, instanceNum, primaryNICName, primaryIPConfigName, nil)
+
+	defer func() {
+		c.metricsAPI.ObserveAPICall(publicIPAddressesListVMSS, deriveStatus(err), sinceStart.Seconds())
+	}()
+
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return netip.Addr{}, fmt.Errorf("failed to list public IPs for instance %s in VMSS %s: %w", instanceNum, vmssName, err)
+		}
+		for _, pip := range page.Value {
+			if pip.Properties != nil && pip.Properties.IPAddress != nil {
+				addr, err := netip.ParseAddr(*pip.Properties.IPAddress)
+				if err != nil {
+					return netip.Addr{}, fmt.Errorf("failed to parse public IP %q for instance %s in VMSS %s: %w", *pip.Properties.IPAddress, instanceNum, vmssName, err)
+				}
+				return addr, nil
+			}
+		}
+	}
+	return netip.Addr{}, fmt.Errorf("no public IP address found for instance %s in VMSS %s", instanceNum, vmssName)
+}
+
+// getVMPublicIP resolves a public IP address reference to its actual IP address.
+// publicIPRef must be a valid resource ID
+func (c *Client) getVMPublicIP(ctx context.Context, publicIPRef *armnetwork.PublicIPAddress) (netip.Addr, error) {
+	if publicIPRef.ID == nil {
+		return netip.Addr{}, fmt.Errorf("public IP reference has no resource ID")
+	}
+	resourceID, err := arm.ParseResourceID(*publicIPRef.ID)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to parse public IP resource ID %q: %w", *publicIPRef.ID, err)
+	}
+
+	c.limiter.Limit(ctx, publicIPAddressesGet)
+	sinceStart := spanstat.Start()
+
+	pip, err := c.publicIPAddresses.Get(ctx, resourceID.ResourceGroupName, resourceID.Name, nil)
+	c.metricsAPI.ObserveAPICall(publicIPAddressesGet, deriveStatus(err), sinceStart.Seconds())
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to get public IP %s: %w", resourceID.Name, err)
+	}
+	if pip.Properties == nil || pip.Properties.IPAddress == nil {
+		return netip.Addr{}, fmt.Errorf("public IP %s has no IP address assigned", resourceID.Name)
+	}
+	addr, err := netip.ParseAddr(*pip.Properties.IPAddress)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("failed to parse public IP %q for %s: %w", *pip.Properties.IPAddress, resourceID.Name, err)
+	}
+	return addr, nil
+}
+
 // AssignPublicIPAddressesVMSS assigns a public IP to a VMSS instance.
 // The public IP is allocated from a Public IP Prefix matching publicIpTags
-func (c *Client) AssignPublicIPAddressesVMSS(ctx context.Context, instanceID, vmssName string, publicIpTags ipamTypes.Tags) (string, error) {
+func (c *Client) AssignPublicIPAddressesVMSS(ctx context.Context, instanceID, vmssName string, publicIpTags ipamTypes.Tags) (netip.Addr, error) {
 	// The instance ID format is:
 	// /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachineScaleSets/{vmssName}/virtualMachines/{instanceNum}
 	// Parse the instance ID to get just the instance number
 	resourceID, err := arm.ParseResourceID(instanceID)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse instance ID %q: %w", instanceID, err)
+		return netip.Addr{}, fmt.Errorf("failed to parse instance ID %q: %w", instanceID, err)
 	}
 	instanceNum := resourceID.Name
 
@@ -857,7 +864,7 @@ func (c *Client) AssignPublicIPAddressesVMSS(ctx context.Context, instanceID, vm
 
 	c.metricsAPI.ObserveAPICall(virtualMachineScaleSetVMsGet, deriveStatus(err), sinceStart.Seconds())
 	if err != nil {
-		return "", fmt.Errorf("failed to get VM %s from VMSS %s: %w", instanceID, vmssName, err)
+		return netip.Addr{}, fmt.Errorf("failed to get VM %s from VMSS %s: %w", instanceID, vmssName, err)
 	}
 
 	// Search for the primary network interface configuration
@@ -871,7 +878,7 @@ func (c *Client) AssignPublicIPAddressesVMSS(ctx context.Context, instanceID, vm
 	}
 
 	if primaryNetIfConfig == nil {
-		return "", fmt.Errorf("can't find primary interface for VM %s from VMSS %s", instanceID, vmssName)
+		return netip.Addr{}, fmt.Errorf("can't find primary interface for VM %s from VMSS %s", instanceID, vmssName)
 	}
 
 	// Find the primary IP configuration
@@ -890,7 +897,7 @@ func (c *Client) AssignPublicIPAddressesVMSS(ctx context.Context, instanceID, vm
 		if primaryNetIfConfig.Name != nil {
 			netIfName = *primaryNetIfConfig.Name
 		}
-		return "", fmt.Errorf("can't find primary IP configuration for network configuration %s from VM %s from VMSS %s",
+		return netip.Addr{}, fmt.Errorf("can't find primary IP configuration for network configuration %s from VM %s from VMSS %s",
 			netIfName,
 			instanceID,
 			vmssName,
@@ -903,25 +910,19 @@ func (c *Client) AssignPublicIPAddressesVMSS(ctx context.Context, instanceID, vm
 			// This leads to the VM failing to provision properly. In this case, we need to delete the erroneous public IP address configuration
 			// and configure it again.
 			if err := c.deletePublicIPAddressConfigurationVMSS(ctx, instanceNum, vmssName, &vm, primaryIPConfig); err != nil {
-				return "", fmt.Errorf("failed to delete public IP address configuration for VM %s from VMSS %s: %w", instanceID, vmssName, err)
+				return netip.Addr{}, fmt.Errorf("failed to delete public IP address configuration for VM %s from VMSS %s: %w", instanceID, vmssName, err)
 			}
 		} else {
-			netIfName := "<unknown>"
-			if primaryNetIfConfig.Name != nil {
-				netIfName = *primaryNetIfConfig.Name
-			}
-			return "", fmt.Errorf("public IP address already assigned to primary IP configuration for network configuration %s from VM %s from VMSS %s",
-				netIfName,
-				instanceID,
-				vmssName,
-			)
+			// Public IP already successfully provisioned, look up and return the actual IP address
+			// so the caller can record the assignment without re-attempting allocation.
+			return c.getVMSSPublicIP(ctx, vmssName, instanceNum)
 		}
 	}
 
 	// Find a public IP prefix with the given tags
 	publicIPPrefixID, err := c.getPublicIPPrefixIDByTags(ctx, publicIpTags)
 	if err != nil {
-		return "", err
+		return netip.Addr{}, err
 	}
 
 	// Create a new public IP configuration
@@ -950,30 +951,27 @@ func (c *Client) AssignPublicIPAddressesVMSS(ctx context.Context, instanceID, vm
 	poller, err := c.virtualMachineScaleSetVMs.BeginUpdate(ctx, c.resourceGroup, vmssName, instanceNum, vm.VirtualMachineScaleSetVM, nil)
 	if err != nil {
 		c.metricsAPI.ObserveAPICall(virtualMachineScaleSetVMsUpdate, deriveStatus(err), sinceStart.Seconds())
-		return "", fmt.Errorf("unable to update virtualMachineScaleSetVMs: %w", err)
+		return netip.Addr{}, fmt.Errorf("unable to update virtualMachineScaleSetVMs: %w", err)
 	}
 
 	_, err = poller.PollUntilDone(ctx, nil)
 	c.metricsAPI.ObserveAPICall(virtualMachineScaleSetVMsUpdate, deriveStatus(err), sinceStart.Seconds())
 	if err != nil {
-		return "", fmt.Errorf("error while waiting for virtualMachineScaleSetVMs Update to complete: %w", err)
+		return netip.Addr{}, fmt.Errorf("error while waiting for virtualMachineScaleSetVMs Update to complete: %w", err)
 	}
 
-	// TODO return the actual public IP address
-	// This would require additional API call(s) and polling, so the
-	// Public IP Prefix ID is good enough to start with
-	return publicIPPrefixID, nil
+	return c.getVMSSPublicIP(ctx, vmssName, instanceNum)
 }
 
 // AssignPublicIPAddressesVM assigns a public IP to a VM instance.
 // The public IP is allocated from a Public IP Prefix matching publicIpTags
-func (c *Client) AssignPublicIPAddressesVM(ctx context.Context, instanceID string, publicIpTags ipamTypes.Tags) (string, error) {
+func (c *Client) AssignPublicIPAddressesVM(ctx context.Context, instanceID string, publicIpTags ipamTypes.Tags) (netip.Addr, error) {
 	// The instance ID format is:
 	// /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/{vmName}
 	// Parse the instance ID to get the VM name
 	resourceID, err := arm.ParseResourceID(instanceID)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse instance ID %q: %w", instanceID, err)
+		return netip.Addr{}, fmt.Errorf("failed to parse instance ID %q: %w", instanceID, err)
 	}
 	vmName := resourceID.Name
 
@@ -989,7 +987,7 @@ func (c *Client) AssignPublicIPAddressesVM(ctx context.Context, instanceID strin
 
 	c.metricsAPI.ObserveAPICall(virtualMachinesGet, deriveStatus(err), sinceStart.Seconds())
 	if err != nil {
-		return "", fmt.Errorf("failed to get VM %s: %w", vmName, err)
+		return netip.Addr{}, fmt.Errorf("failed to get VM %s: %w", vmName, err)
 	}
 
 	// Search for the primary network interface
@@ -1004,13 +1002,13 @@ func (c *Client) AssignPublicIPAddressesVM(ctx context.Context, instanceID strin
 	}
 
 	if primaryNetIfID == "" {
-		return "", fmt.Errorf("can't find primary interface for VM %s", vmName)
+		return netip.Addr{}, fmt.Errorf("can't find primary interface for VM %s", vmName)
 	}
 
 	// Parse interface ID to get the interface name
 	netIfResourceID, err := arm.ParseResourceID(primaryNetIfID)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse network interface ID %q: %w", primaryNetIfID, err)
+		return netip.Addr{}, fmt.Errorf("failed to parse network interface ID %q: %w", primaryNetIfID, err)
 	}
 	interfaceName := netIfResourceID.Name
 
@@ -1022,7 +1020,7 @@ func (c *Client) AssignPublicIPAddressesVM(ctx context.Context, instanceID strin
 
 	c.metricsAPI.ObserveAPICall(interfacesGet, deriveStatus(err), sinceStart.Seconds())
 	if err != nil {
-		return "", fmt.Errorf("failed to get network interface %s: %w", interfaceName, err)
+		return netip.Addr{}, fmt.Errorf("failed to get network interface %s: %w", interfaceName, err)
 	}
 
 	// Find the primary IP configuration
@@ -1037,7 +1035,7 @@ func (c *Client) AssignPublicIPAddressesVM(ctx context.Context, instanceID strin
 	}
 
 	if primaryIPConfig == nil {
-		return "", fmt.Errorf("can't find primary IP configuration for interface %s", interfaceName)
+		return netip.Addr{}, fmt.Errorf("can't find primary IP configuration for interface %s", interfaceName)
 	}
 
 	if primaryIPConfig.Properties.PublicIPAddress != nil {
@@ -1046,17 +1044,19 @@ func (c *Client) AssignPublicIPAddressesVM(ctx context.Context, instanceID strin
 			// This leads to the VM failing to provision properly. In this case, we need to delete the erroneous public IP address configuration
 			// and configure it again.
 			if err := c.deletePublicIPAddressConfigurationVM(ctx, interfaceName, vmName, &iface, primaryIPConfig); err != nil {
-				return "", fmt.Errorf("failed to delete public IP address configuration for interface %s for VM %s: %w", interfaceName, vmName, err)
+				return netip.Addr{}, fmt.Errorf("failed to delete public IP address configuration for interface %s for VM %s: %w", interfaceName, vmName, err)
 			}
 		} else {
-			return "", fmt.Errorf("public IP address already assigned to primary IP configuration for interface %s", interfaceName)
+			// Public IP already successfully provisioned, look up and return the actual IP address
+			// so the caller can record the assignment without re-attempting allocation.
+			return c.getVMPublicIP(ctx, primaryIPConfig.Properties.PublicIPAddress)
 		}
 	}
 
 	// Find a public IP prefix with the given tags
 	publicIPPrefixID, err := c.getPublicIPPrefixIDByTags(ctx, publicIpTags)
 	if err != nil {
-		return "", err
+		return netip.Addr{}, err
 	}
 
 	// Assign the public IP prefix to the primary IP configuration
@@ -1076,19 +1076,27 @@ func (c *Client) AssignPublicIPAddressesVM(ctx context.Context, instanceID strin
 	poller, err := c.interfaces.BeginCreateOrUpdate(ctx, c.resourceGroup, interfaceName, iface.Interface, nil)
 	if err != nil {
 		c.metricsAPI.ObserveAPICall(interfacesCreateOrUpdate, deriveStatus(err), sinceStart.Seconds())
-		return "", fmt.Errorf("unable to update interface %s for VM %s: %w", interfaceName, vmName, err)
+		return netip.Addr{}, fmt.Errorf("unable to update interface %s for VM %s: %w", interfaceName, vmName, err)
 	}
 
-	_, err = poller.PollUntilDone(ctx, nil)
+	updatedIface, err := poller.PollUntilDone(ctx, nil)
 	c.metricsAPI.ObserveAPICall(interfacesCreateOrUpdate, deriveStatus(err), sinceStart.Seconds())
 	if err != nil {
-		return "", fmt.Errorf("error while waiting for interface CreateOrUpdate to complete for VM %s: %w", vmName, err)
+		return netip.Addr{}, fmt.Errorf("error while waiting for interface CreateOrUpdate to complete for VM %s: %w", vmName, err)
 	}
 
-	// TODO return the actual public IP address
-	// This would require additional API call(s) and polling, so the
-	// Public IP Prefix ID is good enough to start with
-	return publicIPPrefixID, nil
+	if updatedIface.Properties != nil {
+		for _, ipConfig := range updatedIface.Properties.IPConfigurations {
+			if ipConfig.Properties == nil || ipConfig.Properties.Primary == nil || !*ipConfig.Properties.Primary {
+				continue
+			}
+			if ipConfig.Properties.PublicIPAddress == nil {
+				return netip.Addr{}, fmt.Errorf("no public IP reference on updated NIC for VM %s", vmName)
+			}
+			return c.getVMPublicIP(ctx, ipConfig.Properties.PublicIPAddress)
+		}
+	}
+	return netip.Addr{}, fmt.Errorf("no primary IP configuration found on updated NIC for VM %s", vmName)
 }
 
 // deletePublicIPAddressConfigurationVMSS deletes the public IP address configuration from a VMSS instance

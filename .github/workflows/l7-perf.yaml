@@ -63,11 +63,11 @@ concurrency:
 
 env:
   # renovate: datasource=github-releases depName=eksctl-io/eksctl
-  eksctl_version: v0.226.0
+  eksctl_version: v0.228.0
   # renovate: datasource=github-releases depName=kubernetes/kubernetes
-  kubectl_version: v1.36.1
+  kubectl_version: v1.36.2
   # renovate: datasource=docker depName=google/cloud-sdk
-  gcloud_version: 568.0.0
+  gcloud_version: 574.0.0
 
   test_name: l7-perf
   cluster_name: ${{ github.run_id }}-${{ github.run_attempt }}
@@ -119,7 +119,7 @@ jobs:
           sha: ${{ inputs.SHA || github.sha }}
 
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -166,8 +166,8 @@ jobs:
           if [ -z "${VERSION}" ]; then
             CILIUM_INSTALL_DEFAULTS="--chart-directory=untrusted/install/kubernetes/cilium \
               ${CILIUM_INSTALL_DEFAULTS} \
-              --set=image.override=${{ env.REGISTRY_DEV }}/${{ env.ORGANIZATION_DEV }}/cilium-ci:${SHA} \
-              --set=operator.image.override=${{ env.REGISTRY_DEV }}/${{ env.ORGANIZATION_DEV }}/operator-aws-ci:${SHA}"
+              --set=image.override=${{ vars.DOCKER_READ_HOST }}/${{ vars.DOCKER_READ_ORG }}/cilium-ci:${SHA} \
+              --set=operator.image.override=${{ vars.DOCKER_READ_HOST }}/${{ vars.DOCKER_READ_ORG }}/operator-aws-ci:${SHA}"
           else
             CILIUM_INSTALL_DEFAULTS="--version ${VERSION} ${CILIUM_INSTALL_DEFAULTS}"
           fi
@@ -214,7 +214,7 @@ jobs:
       # steps must take care not to execute untrusted code.
       - name: Checkout context ref (NOT TRUSTED)
         if: ${{ steps.vars.outputs.cilium_version == '' }} # We don't need to checkout the PR if released version installation is requested.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ steps.vars.outputs.SHA }}
           persist-credentials: false
@@ -228,6 +228,9 @@ jobs:
         with:
           SHA: ${{ steps.vars.outputs.SHA }}
           images: cilium-ci operator-aws-ci cilium-cli-ci
+          login-host: ${{ vars.DOCKER_READ_HOST }}
+          login-username: ${{ vars.DOCKER_READ_USERNAME }}
+          login-password: ${{ secrets.DOCKER_READ_PASSWORD }}
 
       - name: Wait for Nighthawk Benchmarking framework image
         shell: bash
@@ -238,10 +241,10 @@ jobs:
           fi
 
       - name: Install Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           # renovate: datasource=golang-version depName=go
-          go-version: 1.26.3
+          go-version: 1.26.5
 
       - name: Setup gcloud credentials
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
@@ -272,7 +275,7 @@ jobs:
           rm "eksctl_$(uname -s)_amd64.tar.gz"
 
       - name: Set up AWS CLI credentials
-        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ steps.vars.outputs.eks_region }}
@@ -289,7 +292,7 @@ jobs:
           gcloud version
 
       - name: Clone ClusterLoader2
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: kubernetes/perf-tests
           # Avoid using renovate to update this dependency because: (1)
@@ -319,8 +322,16 @@ jobs:
         with:
           kubeconfig: "~/.kube/config"
 
+      - name: Create imagePullSecret
+        run: |
+          kubectl create secret docker-registry cilium-registry \
+            --namespace kube-system \
+            --docker-server=${{ vars.DOCKER_READ_HOST }} \
+            --docker-username="${{ vars.DOCKER_READ_USERNAME }}" \
+            --docker-password="${{ secrets.DOCKER_READ_PASSWORD }}"
+
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@3ce83aa3b4ea3ce6d97023c4d83c22b73a4ed3b4 # v0.19.2
+        uses: cilium/cilium-cli@e391e739db83a8b888ecf18786af6853c51a0c58 # v0.19.5
         with:
           skip-build: ${{ env.CILIUM_CLI_SKIP_BUILD }}
           image-repo: ${{ env.CILIUM_CLI_IMAGE_REPO }}
@@ -349,6 +360,7 @@ jobs:
 
           cilium install ${{ steps.vars.outputs.cilium_install_defaults }} \
             --set=k8sServiceHost="${K8S_API_SRV_ADDR}" --set=k8sServicePort=443 \
+            --helm-set=imagePullSecrets[0].name=cilium-registry \
             --set=ipv4NativeRoutingCIDR="${NATIVE_CIDR_BLOCK}"
 
       - name: Delete context ref
@@ -505,7 +517,7 @@ jobs:
 
       - name: Export results and sysdump to GS bucket
         if: ${{ always() && steps.run-cl2.outcome != 'skipped' && steps.run-cl2.outcome != 'cancelled' }}
-        uses: cilium/scale-tests-action/export-results@995a08156171644e92e5688b0785b7baf86ce22a # main
+        uses: cilium/scale-tests-action/export-results@688f70c8708f4bdd2ef04ad7710d35aaea1ea57c # main
         with:
           test_name: ${{ steps.vars.outputs.test_name }}
           tested_sha: ${{ steps.vars.outputs.SHA }}
@@ -516,7 +528,7 @@ jobs:
       # Refresh credentials
       - name: Set up AWS CLI credentials
         if:  ${{ always() && steps.deploy-cluster.outcome != 'skipped' }}
-        uses: aws-actions/configure-aws-credentials@d979d5b3a71173a29b74b5b88418bfda9437d885 # v6.1.1
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ steps.vars.outputs.eks_region }}

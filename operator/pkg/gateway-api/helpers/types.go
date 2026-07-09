@@ -15,24 +15,31 @@ import (
 
 const (
 	kindGateway       = "Gateway"
+	kindListenerSet   = "ListenerSet"
 	kindService       = "Service"
 	kindServiceImport = "ServiceImport"
 	kindSecret        = "Secret"
 	kindConfigMap     = "ConfigMap"
 
-	GatewayClassKind      string = "gatewayclasses"
-	GatewayKind           string = "gateways"
-	HTTPRouteKind         string = "httproutes"
-	GRPCRouteKind         string = "grpcroutes"
-	ReferenceGrantKind    string = "referencegrants"
-	TLSRouteKind          string = "tlsroutes"
-	TLSRouteListKind      string = "tlsroutelists"
-	ServiceImportKind     string = "serviceimports"
-	ServiceImportListKind string = "serviceimportlists"
+	GatewayClassKind     string = "gatewayclasses"
+	GatewayKind          string = "gateways"
+	HTTPRouteKind        string = "httproutes"
+	GRPCRouteKind        string = "grpcroutes"
+	ReferenceGrantKind   string = "referencegrants"
+	BackendTLSPolicyKind string = "backendtlspolicies"
+	TLSRouteKind         string = "tlsroutes"
+	TCPRouteKind         string = "tcproutes"
+	UDPRouteKind         string = "udproutes"
+	ListenerSetKind      string = "listenersets"
+	ServiceImportKind    string = "serviceimports"
 )
 
 func IsGateway(parent gatewayv1.ParentReference) bool {
 	return (parent.Kind == nil || *parent.Kind == kindGateway) && (parent.Group == nil || *parent.Group == gatewayv1.GroupName)
+}
+
+func IsListenerSet(parent gatewayv1.ParentReference) bool {
+	return parent.Kind != nil && *parent.Kind == kindListenerSet && (parent.Group == nil || *parent.Group == gatewayv1.GroupName)
 }
 
 func IsGammaService(parent gatewayv1.ParentReference) bool {
@@ -100,17 +107,65 @@ func GetConcreteObject(schemaType schema.GroupVersionKind) runtime.Object {
 	kind := schemaType.Kind
 
 	switch kind {
+	case GatewayClassKind:
+		return &gatewayv1.GatewayClass{}
+	case GatewayKind:
+		return &gatewayv1.Gateway{}
 	case TLSRouteKind:
 		return &gatewayv1.TLSRoute{}
-	case TLSRouteListKind:
-		return &gatewayv1.TLSRouteList{}
+	case HTTPRouteKind:
+		return &gatewayv1.HTTPRoute{}
+	case GRPCRouteKind:
+		return &gatewayv1.GRPCRoute{}
+	case ReferenceGrantKind:
+		return &gatewayv1.ReferenceGrant{}
+	case BackendTLSPolicyKind:
+		return &gatewayv1.BackendTLSPolicy{}
+	case TCPRouteKind:
+		return &gatewayv1.TCPRoute{}
+	case UDPRouteKind:
+		return &gatewayv1.UDPRoute{}
+	case ListenerSetKind:
+		return &gatewayv1.ListenerSet{}
 	case ServiceImportKind:
 		return &mcsapiv1beta1.ServiceImport{}
-	case ServiceImportListKind:
-		return &mcsapiv1beta1.ServiceImportList{}
 	default:
 		// panic is okay here because this is a progammer error
 		panic(fmt.Sprintf("Tried to get a concrete type that is not implemented, %s", schemaType.Kind))
+	}
+}
+
+// getConcreteListObject returns a list instance of a concrete object type based on the
+// given GroupVersionKind.
+func GetConcreteListObject(schemaType schema.GroupVersionKind) runtime.Object {
+	kind := schemaType.Kind
+
+	switch kind {
+	case GatewayClassKind:
+		return &gatewayv1.GatewayClassList{}
+	case GatewayKind:
+		return &gatewayv1.GatewayList{}
+	case TLSRouteKind:
+		return &gatewayv1.TLSRouteList{}
+	case HTTPRouteKind:
+		return &gatewayv1.HTTPRouteList{}
+	case GRPCRouteKind:
+		return &gatewayv1.GRPCRouteList{}
+	case ReferenceGrantKind:
+		return &gatewayv1.ReferenceGrantList{}
+	case BackendTLSPolicyKind:
+		return &gatewayv1.BackendTLSPolicyList{}
+	case TCPRouteKind:
+		return &gatewayv1.TCPRouteList{}
+	case UDPRouteKind:
+		return &gatewayv1.UDPRouteList{}
+	case ListenerSetKind:
+		return &gatewayv1.ListenerSetList{}
+	case ServiceImportKind:
+		return &mcsapiv1beta1.ServiceImportList{}
+	default:
+		// panic is okay here because this is a progammer error
+		panic(fmt.Sprintf("Tried to get a concrete list type that is not implemented, %s", schemaType.Kind))
 	}
 }
 

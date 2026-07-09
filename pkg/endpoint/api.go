@@ -27,7 +27,6 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/trafficdirection"
-	"github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
@@ -65,18 +64,13 @@ func NewEndpointFromChangeModel(p EndpointParams, dnsRulesAPI DNSRulesAPI, proxy
 	ep.containerIfName = model.ContainerInterfaceName
 	ep.containerNetnsPath = model.ContainerNetnsPath
 	ep.parentIfIndex = int(model.ParentInterfaceIndex)
-	if model.ContainerName != "" {
-		ep.containerName.Store(&model.ContainerName)
-	}
 	if model.ContainerID != "" {
 		ep.containerID.Store(&model.ContainerID)
 	}
-	ep.dockerNetworkID = model.DockerNetworkID
-	ep.dockerEndpointID = model.DockerEndpointID
 	ep.K8sPodName = model.K8sPodName
 	ep.K8sNamespace = model.K8sNamespace
 	ep.K8sUID = model.K8sUID
-	ep.disableLegacyIdentifiers = model.DisableLegacyIdentifiers
+	ep.isSecondaryInterface = model.IsSecondaryInterface
 
 	if model.Mac != "" {
 		m, err := mac.ParseMAC(model.Mac)
@@ -165,22 +159,9 @@ func NewEndpointFromChangeModel(p EndpointParams, dnsRulesAPI DNSRulesAPI, proxy
 }
 
 func (e *Endpoint) getModelEndpointIdentitiersRLocked() *models.EndpointIdentifiers {
-	identifiers := &models.EndpointIdentifiers{
-		CniAttachmentID:  e.GetCNIAttachmentID(),
-		DockerEndpointID: e.dockerEndpointID,
-		DockerNetworkID:  e.dockerNetworkID,
+	return &models.EndpointIdentifiers{
+		CniAttachmentID: e.GetCNIAttachmentID(),
 	}
-
-	// Use legacy endpoint identifiers only if the endpoint has not opted out
-	if !e.disableLegacyIdentifiers {
-		identifiers.ContainerID = e.GetContainerID()
-		identifiers.ContainerName = e.GetContainerName()
-		identifiers.PodName = e.GetK8sNamespaceAndPodName()
-		identifiers.K8sPodName = e.K8sPodName
-		identifiers.K8sNamespace = e.K8sNamespace
-	}
-
-	return identifiers
 }
 
 func (e *Endpoint) getModelNetworkingRLocked() *models.EndpointNetworking {
@@ -334,10 +315,11 @@ func (e *Endpoint) GetHealthModel() *models.EndpointHealth {
 
 // getNamedPortsModel returns the endpoint's NamedPorts object.
 func (e *Endpoint) getNamedPortsModel() models.NamedPorts {
-	var k8sPorts types.NamedPortMap
-	if p := e.k8sPorts.Load(); p != nil {
-		k8sPorts = *p
+	p := e.k8sPorts.Load()
+	if p == nil || *p == nil {
+		return models.NamedPorts{}
 	}
+	k8sPorts := *p
 
 	np := make(models.NamedPorts, 0, len(k8sPorts))
 	// keep named ports ordered to avoid the unnecessary updates to
@@ -463,8 +445,8 @@ func (e *Endpoint) GetPolicyModel() *models.EndpointPolicyStatus {
 	desiredMdl := &models.EndpointPolicy{
 		ID: int64(e.SecurityIdentity.ID),
 		// This field should be removed.
-		Build:                    int64(e.nextPolicyRevision),
-		PolicyRevision:           int64(e.nextPolicyRevision),
+		Build:                    int64(e.desiredPolicyRevision),
+		PolicyRevision:           int64(e.desiredPolicyRevision),
 		AllowedIngressIdentities: desiredIngressIdentities,
 		AllowedEgressIdentities:  desiredEgressIdentities,
 		DeniedIngressIdentities:  desiredDenyIngressIdentities,
@@ -553,18 +535,15 @@ func (e *Endpoint) ProcessChangeRequest(newEp *Endpoint, validPatchTransitionSta
 		}
 	}
 
-	if newContainerName := newEp.containerName.Load(); newContainerName != nil && *newContainerName != "" {
-		e.containerName.Store(newContainerName)
-		// no need to set changed here
-	}
-
 	if newContainerID := newEp.containerID.Load(); newContainerID != nil && *newContainerID != "" {
 		e.containerID.Store(newContainerID)
 		// no need to set changed here
 	}
 
 	e.replaceInformationLabels(labels.LabelSourceAny, newEp.labels.OrchestrationInfo)
-	rev := e.replaceIdentityLabels(labels.LabelSourceAny, newEp.labels.IdentityLabels())
+	// PATCH does not remove generated labels and the caller has a comment stating that
+	// labels are ignored, but here we go.
+	rev := e.replaceNonGeneratedIdentityLabels(labels.LabelSourceAny, newEp.labels.IdentityLabels())
 	if rev != 0 {
 		// Run as a goroutine since the runIdentityResolver needs to get the lock
 		go e.runIdentityResolver(e.aliveCtx, false, 0)
@@ -653,4 +632,12 @@ func (e *Endpoint) GetRealizedL4PolicyRuleOriginModel() (policy *models.L4Policy
 		return
 	}
 	return e.realizedPolicy.SelectorPolicy.L4Policy.GetRuleOriginModel(), e.policyRevision, nil
+}
+
+// GetDesiredPolicy returns the desired or current endpoint policy.
+// May return nil in certain circumstances.
+func (e *Endpoint) GetDesiredPolicy() *policy.EndpointPolicy {
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
+	return e.desiredPolicy
 }

@@ -7,13 +7,15 @@ import (
 	"context"
 	"log/slog"
 	"maps"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
+	gatewayapihelpers "github.com/cilium/cilium/operator/pkg/gateway-api/helpers"
 	"github.com/cilium/cilium/operator/pkg/model"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
@@ -52,84 +54,17 @@ func groupDerefOr(group *gatewayv1.Group, defaultGroup string) string {
 	return defaultGroup
 }
 
-// isAllowed returns true if the provided Route is allowed to attach to given gateway
-func isAllowed(ctx context.Context, c client.Client, gw *gatewayv1.Gateway, route metav1.Object, logger *slog.Logger) bool {
-	for _, listener := range gw.Spec.Listeners {
-
-		// all routes in the same namespace are allowed for this listener
-		if listener.AllowedRoutes == nil || listener.AllowedRoutes.Namespaces == nil {
-			if route.GetNamespace() == gw.GetNamespace() {
-				return true
-			}
-			continue
-		}
-
-		// check if route is kind-allowed
-		if !isKindAllowed(listener, route) {
-			continue
-		}
-
-		// check if route is namespace-allowed
-		switch *listener.AllowedRoutes.Namespaces.From {
-		case gatewayv1.NamespacesFromAll:
-			return true
-		case gatewayv1.NamespacesFromSame:
-			if route.GetNamespace() == gw.GetNamespace() {
-				return true
-			}
-		case gatewayv1.NamespacesFromSelector:
-			nsList := &corev1.NamespaceList{}
-			selector, _ := metav1.LabelSelectorAsSelector(listener.AllowedRoutes.Namespaces.Selector)
-			if err := c.List(ctx, nsList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
-				logger.ErrorContext(ctx, "Unable to list namespaces", logfields.Error, err)
-				continue
-			}
-
-			for _, ns := range nsList.Items {
-				if ns.Name == route.GetNamespace() {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-// listenerisAllowed is a single listener check to see if a route and listerner are valid
-func listenerisAllowed(ctx context.Context, c client.Client, gw *gatewayv1.Gateway, listener *gatewayv1.Listener, route metav1.Object, logger *slog.Logger) bool {
-	// all routes in the same namespace are allowed for this listener
+// listenerisAllowed reports whether route may attach to listener.
+func listenerisAllowed(listenerNamespace string, listener *gatewayv1.Listener, route metav1.Object, namespaceLabels gatewayapihelpers.NamespaceLabelIndex) bool {
 	if listener.AllowedRoutes == nil || listener.AllowedRoutes.Namespaces == nil {
-		return route.GetNamespace() == gw.GetNamespace()
+		return gatewayapihelpers.IsListenerNamespaceAllowed(*listener, route.GetNamespace(), listenerNamespace, namespaceLabels)
 	}
 
 	// check if route is kind-allowed
 	if !isKindAllowed(*listener, route) {
 		return false
 	}
-	// check if route is namespace-allowed
-	switch *listener.AllowedRoutes.Namespaces.From {
-	case gatewayv1.NamespacesFromAll:
-		return true
-	case gatewayv1.NamespacesFromSame:
-		if route.GetNamespace() == gw.GetNamespace() {
-			return true
-		}
-		return false
-	case gatewayv1.NamespacesFromSelector:
-		nsList := &corev1.NamespaceList{}
-		selector, _ := metav1.LabelSelectorAsSelector(listener.AllowedRoutes.Namespaces.Selector)
-		if err := c.List(ctx, nsList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
-			logger.ErrorContext(ctx, "Unable to list namespaces", logfields.Error, err)
-			return false
-		}
-
-		for _, ns := range nsList.Items {
-			if ns.Name == route.GetNamespace() {
-				return true
-			}
-		}
-	}
-	return false
+	return gatewayapihelpers.IsListenerNamespaceAllowed(*listener, route.GetNamespace(), listenerNamespace, namespaceLabels)
 }
 
 func isKindAllowed(listener gatewayv1.Listener, route metav1.Object) bool {
@@ -156,18 +91,15 @@ func isKindAllowed(listener gatewayv1.Listener, route metav1.Object) bool {
 		} else if (kind.Group == nil || string(*kind.Group) == gatewayv1.GroupName) &&
 			kind.Kind == kindGRPCRoute && routeKind == kindGRPCRoute {
 			return true
+		} else if (kind.Group == nil || string(*kind.Group) == gatewayv1.GroupName) &&
+			kind.Kind == kindTCPRoute && routeKind == kindTCPRoute {
+			return true
+		} else if (kind.Group == nil || string(*kind.Group) == gatewayv1.GroupName) &&
+			kind.Kind == kindUDPRoute && routeKind == kindUDPRoute {
+			return true
 		}
 	}
 	return false
-}
-
-func computeHosts[T ~string](gw *gatewayv1.Gateway, hostnames []T, excludeHostNames []T) []string {
-	hosts := make([]string, 0, len(hostnames))
-	for _, listener := range gw.Spec.Listeners {
-		hosts = append(hosts, computeHostsForListener(&listener, hostnames, excludeHostNames)...)
-	}
-
-	return hosts
 }
 
 func computeHostsForListener[T ~string](listener *gatewayv1.Listener, hostnames []T, excludeHostNames []T) []string {
@@ -205,14 +137,14 @@ func getSupportedRouteKinds(protocol gatewayv1.ProtocolType) []gatewayv1.RouteGr
 	case gatewayv1.TCPProtocolType:
 		return []gatewayv1.RouteGroupKind{
 			{
-				Group: GroupPtr(gatewayv1alpha2.GroupName),
+				Group: GroupPtr(gatewayv1.GroupName),
 				Kind:  kindTCPRoute,
 			},
 		}
 	case gatewayv1.UDPProtocolType:
 		return []gatewayv1.RouteGroupKind{
 			{
-				Group: GroupPtr(gatewayv1alpha2.GroupName),
+				Group: GroupPtr(gatewayv1.GroupName),
 				Kind:  kindUDPRoute,
 			},
 		}
@@ -229,9 +161,9 @@ func getGatewayKindForObject(obj metav1.Object) gatewayv1.Kind {
 		return kindGRPCRoute
 	case *gatewayv1.TLSRoute:
 		return kindTLSRoute
-	case *gatewayv1alpha2.UDPRoute:
+	case *gatewayv1.UDPRoute:
 		return kindUDPRoute
-	case *gatewayv1alpha2.TCPRoute:
+	case *gatewayv1.TCPRoute:
 		return kindTCPRoute
 	default:
 		return "Unknown"
@@ -250,4 +182,147 @@ func mergeMap(left, right map[string]string) map[string]string {
 func setMergedLabelsAndAnnotations(temp, desired client.Object) {
 	temp.SetAnnotations(mergeMap(temp.GetAnnotations(), desired.GetAnnotations()))
 	temp.SetLabels(mergeMap(temp.GetLabels(), desired.GetLabels()))
+}
+
+// isListenerSetAllowed determines if a Gateway allows a given ListenerSet
+func isListenerSetAllowed(
+	ctx context.Context,
+	c client.Client,
+	gw *gatewayv1.Gateway,
+	ls *gatewayv1.ListenerSet,
+	logger *slog.Logger,
+) bool {
+	if gw.Spec.AllowedListeners == nil {
+		return false
+	}
+	ns := gw.Spec.AllowedListeners.Namespaces
+	if ns == nil || ns.From == nil {
+		return false
+	}
+	switch *ns.From {
+	case gatewayv1.NamespacesFromNone:
+		return false
+	case gatewayv1.NamespacesFromAll:
+		return true
+	case gatewayv1.NamespacesFromSame:
+		return ls.GetNamespace() == gw.GetNamespace()
+	case gatewayv1.NamespacesFromSelector:
+		nsList := &corev1.NamespaceList{}
+		selector, err := metav1.LabelSelectorAsSelector(ns.Selector)
+		if err != nil {
+			logger.ErrorContext(ctx, "Unable to parse namespace selector", logfields.Error, err)
+			return false
+		}
+		if err := c.List(ctx, nsList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
+			logger.ErrorContext(ctx, "Unable to list namespaces", logfields.Error, err)
+			return false
+		}
+		for _, n := range nsList.Items {
+			if n.Name == ls.GetNamespace() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func gatewayFQR(gw *gatewayv1.Gateway) model.FullyQualifiedResource {
+	return model.FullyQualifiedResource{
+		Name:      gw.GetName(),
+		Namespace: gw.GetNamespace(),
+		Group:     gatewayv1.SchemeGroupVersion.Group,
+		Version:   gatewayv1.SchemeGroupVersion.Version,
+		Kind:      "Gateway",
+		UID:       string(gw.GetUID()),
+	}
+}
+
+func listenerSetFQR(ls *gatewayv1.ListenerSet) model.FullyQualifiedResource {
+	return model.FullyQualifiedResource{
+		Name:      ls.GetName(),
+		Namespace: ls.GetNamespace(),
+		Group:     gatewayv1.SchemeGroupVersion.Group,
+		Version:   gatewayv1.SchemeGroupVersion.Version,
+		Kind:      "ListenerSet",
+		UID:       string(ls.GetUID()),
+	}
+}
+
+// sortListenerSets sorts ListenerSets by precedence rules
+func sortListenerSets(sets []gatewayv1.ListenerSet) {
+	sort.Slice(sets, func(i, j int) bool {
+		ti := sets[i].CreationTimestamp.Time
+		tj := sets[j].CreationTimestamp.Time
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		ni := sets[i].GetNamespace() + "/" + sets[i].GetName()
+		nj := sets[j].GetNamespace() + "/" + sets[j].GetName()
+		return ni < nj
+	})
+}
+
+func deduplicateHTTPRoutes(routes []gatewayv1.HTTPRoute) []gatewayv1.HTTPRoute {
+	seen := make(map[types.NamespacedName]struct{}, len(routes))
+	result := make([]gatewayv1.HTTPRoute, 0, len(routes))
+	for _, r := range routes {
+		key := types.NamespacedName{Namespace: r.Namespace, Name: r.Name}
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func deduplicateGRPCRoutes(routes []gatewayv1.GRPCRoute) []gatewayv1.GRPCRoute {
+	seen := make(map[types.NamespacedName]struct{}, len(routes))
+	result := make([]gatewayv1.GRPCRoute, 0, len(routes))
+	for _, r := range routes {
+		key := types.NamespacedName{Namespace: r.Namespace, Name: r.Name}
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func deduplicateTLSRoutes(routes []gatewayv1.TLSRoute) []gatewayv1.TLSRoute {
+	seen := make(map[types.NamespacedName]struct{}, len(routes))
+	result := make([]gatewayv1.TLSRoute, 0, len(routes))
+	for _, r := range routes {
+		key := types.NamespacedName{Namespace: r.Namespace, Name: r.Name}
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func deduplicateTCPRoutes(routes []gatewayv1.TCPRoute) []gatewayv1.TCPRoute {
+	seen := make(map[types.NamespacedName]struct{}, len(routes))
+	result := make([]gatewayv1.TCPRoute, 0, len(routes))
+	for _, r := range routes {
+		key := types.NamespacedName{Namespace: r.Namespace, Name: r.Name}
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+func deduplicateUDPRoutes(routes []gatewayv1.UDPRoute) []gatewayv1.UDPRoute {
+	seen := make(map[types.NamespacedName]struct{}, len(routes))
+	result := make([]gatewayv1.UDPRoute, 0, len(routes))
+	for _, r := range routes {
+		key := types.NamespacedName{Namespace: r.Namespace, Name: r.Name}
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			result = append(result, r)
+		}
+	}
+	return result
 }

@@ -176,11 +176,12 @@ type Client struct {
 }
 
 // NewClient creates a new SPIRE client.
-// If the mutual authentication is not enabled, it returns a noop client.
-// When ztunnel is enabled, the client is still created but the identity.Provider
-// returned is a noop since ztunnel handles identity differently.
+// It returns a noop client when neither mutual authentication nor ztunnel-with-SPIRE
+// is enabled. When ztunnel uses SPIRE as its CA, the client is created so that the
+// operator can manage SPIRE entries for enrolled namespaces; the identity.Provider
+// returned in that case is a noop since ztunnel handles identity differently.
 func NewClient(params params) out {
-	if !params.MutualAuthConfig.Enabled {
+	if !params.MutualAuthConfig.Enabled && !params.ZtunnelConfig.UseSpireCA() {
 		return out{
 			Provider: &noopClient{},
 			Client:   nil,
@@ -332,10 +333,28 @@ func (c *Client) Upsert(ctx context.Context, id string) error {
 		return err
 	}
 
-	_, err = c.entry.BatchUpdateEntry(ctx, &entryv1.BatchUpdateEntryRequest{
+	// SPIRE keys updates on entry.Id. Carry over the Id of the existing entry,
+	// otherwise BatchUpdateEntry cannot resolve which row to update and fails
+	// with a per-entry error while the top-level RPC reports success.
+	desired[0].Id = entries.Entries[0].Id
+
+	resp, err := c.entry.BatchUpdateEntry(ctx, &entryv1.BatchUpdateEntryRequest{
 		Entries: desired,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Per-entry failures are reported in resp.Results[].Status, not in err.
+	// Surface them so the caller does not treat a failed update as success and
+	// re-emit the same Upsert on every resync, looping forever.
+	for _, r := range resp.GetResults() {
+		if r.GetStatus().GetCode() != int32(codes.OK) {
+			return fmt.Errorf("failed to update SPIRE entry for %q: %s (code %d)",
+				id, r.GetStatus().GetMessage(), r.GetStatus().GetCode())
+		}
+	}
+	return nil
 }
 
 // UpsertBatch creates or updates multiple SPIFFE entries at once.
@@ -380,6 +399,19 @@ func (c *Client) UpsertBatch(ctx context.Context, ids []string) error {
 	var toUpdate []*types.Entry
 	for j, r := range resp.Results {
 		if r.Status.Code == int32(codes.AlreadyExists) {
+			// SPIRE keys updates on entry.Id. On AlreadyExists, the result
+			// carries the existing entry (including its Id); copy that Id onto
+			// the desired entry so BatchUpdateEntry can resolve the row.
+			// Without it the update fails per-entry while the RPC reports
+			// success, causing the caller to loop forever on each resync.
+			existingID := r.GetEntry().GetId()
+			if existingID == "" {
+				errs = append(errs, fmt.Errorf(
+					"entry already exists but SPIRE returned no Id for %q, cannot update",
+					ids[j]))
+				continue
+			}
+			entries[j].Id = existingID
 			toUpdate = append(toUpdate, entries[j])
 		} else if r.Status.Code != int32(codes.OK) {
 			errs = append(errs, fmt.Errorf("entry create failed: %v: %s",
@@ -389,11 +421,19 @@ func (c *Client) UpsertBatch(ctx context.Context, ids []string) error {
 
 	// Update existing entries
 	if len(toUpdate) > 0 {
-		_, err := c.entry.BatchUpdateEntry(ctx,
+		updateResp, err := c.entry.BatchUpdateEntry(ctx,
 			&entryv1.BatchUpdateEntryRequest{Entries: toUpdate},
 		)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("batch update failed: %w", err))
+		} else {
+			// Per-entry update failures live in the response, not in err.
+			for _, r := range updateResp.GetResults() {
+				if r.GetStatus().GetCode() != int32(codes.OK) {
+					errs = append(errs, fmt.Errorf("entry update failed: %v: %s",
+						r.GetStatus().GetCode(), r.GetStatus().GetMessage()))
+				}
+			}
 		}
 	}
 

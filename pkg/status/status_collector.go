@@ -322,7 +322,7 @@ func (d *statusCollector) getKubeProxyReplacementStatus(ctx context.Context) *mo
 		case loadbalancer.DSRDispatchIPIP:
 			features.NodePort.DsrMode = models.KubeProxyReplacementFeaturesNodePortDsrModeIPIP
 		case loadbalancer.DSRDispatchOption:
-			features.NodePort.DsrMode = models.KubeProxyReplacementFeaturesNodePortDsrModeIPOptionExtension
+			features.NodePort.DsrMode = models.KubeProxyReplacementFeaturesNodePortDsrModeIPOptionSlashExtension
 		case loadbalancer.DSRDispatchGeneve:
 			features.NodePort.DsrMode = models.KubeProxyReplacementFeaturesNodePortDsrModeGeneve
 		}
@@ -618,15 +618,6 @@ func (d *statusCollector) GetStatus(brief bool, requireK8sConnectivity bool) mod
 		msg := "Kvstore service is not ready: " + d.statusResponse.Kvstore.Msg
 		sr.Cilium = &models.Status{
 			State: d.statusResponse.Kvstore.State,
-			Msg:   fmt.Sprintf("%s    %s", ciliumVer, msg),
-		}
-	case d.statusResponse.ContainerRuntime != nil && d.statusResponse.ContainerRuntime.State != models.StatusStateOk:
-		msg := "Container runtime is not ready: " + d.statusResponse.ContainerRuntime.Msg
-		if d.statusResponse.ContainerRuntime.State == models.StatusStateDisabled {
-			msg = "Container runtime is disabled"
-		}
-		sr.Cilium = &models.Status{
-			State: d.statusResponse.ContainerRuntime.State,
 			Msg:   fmt.Sprintf("%s    %s", ciliumVer, msg),
 		}
 	case d.statusParams.Clientset.IsEnabled() && d.statusResponse.Kubernetes != nil && d.statusResponse.Kubernetes.State != models.StatusStateOk && requireK8sConnectivity:

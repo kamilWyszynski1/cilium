@@ -23,7 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 
-	alibabaCloud "github.com/cilium/cilium/pkg/alibabacloud/utils"
+	alibabaCloudTypes "github.com/cilium/cilium/pkg/alibabacloud/types"
+	azureTypes "github.com/cilium/cilium/pkg/azure/types"
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/ip"
@@ -208,7 +209,10 @@ func newNodeStore(logger *slog.Logger, nodeName string, conf *option.DaemonConfi
 			logfields.Required, required,
 			logfields.Available, numAvailable,
 		)
-		if minimumReached {
+		requestedStaticIP, assignedStaticIP := store.staticIPStatus()
+		staticIPReady := !requestedStaticIP || assignedStaticIP != ""
+
+		if minimumReached && staticIPReady {
 			scopedLog.Info(
 				"All required IPs are available in CRD-backed allocation pool",
 			)
@@ -237,36 +241,31 @@ func deriveVpcCIDRs(node *ciliumv2.CiliumNode) (primaryCIDR *cidr.CIDR, secondar
 	// A node belongs to a single VPC so we can pick the first ENI
 	// in the list and derive the VPC CIDR from it.
 	for _, eni := range node.Status.ENI.ENIs {
-		c, err := cidr.ParseCIDR(eni.VPC.PrimaryCIDR)
-		if err == nil {
-			primaryCIDR = c
+		if p := eni.VPC.PrimaryCIDR; p.IsValid() {
+			primaryCIDR = cidr.NewCIDR(netipx.PrefixIPNet(p.Masked()))
 			for _, sc := range eni.VPC.CIDRs {
-				c, err = cidr.ParseCIDR(sc)
-				if err == nil {
-					secondaryCIDRs = append(secondaryCIDRs, c)
+				if sc.IsValid() {
+					secondaryCIDRs = append(secondaryCIDRs, cidr.NewCIDR(netipx.PrefixIPNet(sc.Masked())))
 				}
 			}
 			return
 		}
 	}
 	for _, azif := range node.Status.Azure.Interfaces {
-		c, err := cidr.ParseCIDR(azif.CIDR)
-		if err == nil {
-			primaryCIDR = c
+		if p := azureInterfaceCIDR(azif); p.IsValid() {
+			primaryCIDR = cidr.NewCIDR(netipx.PrefixIPNet(p.Masked()))
 			return
 		}
 	}
 	// return AlibabaCloud vpc CIDR
 	if len(node.Status.AlibabaCloud.ENIs) > 0 {
-		c, err := cidr.ParseCIDR(node.Spec.AlibabaCloud.CIDRBlock)
-		if err == nil {
-			primaryCIDR = c
+		if p := node.Spec.AlibabaCloud.CIDRBlock; p.IsValid() {
+			primaryCIDR = cidr.NewCIDR(netipx.PrefixIPNet(p.Masked()))
 		}
 		for _, eni := range node.Status.AlibabaCloud.ENIs {
 			for _, sc := range eni.VPC.SecondaryCIDRs {
-				c, err = cidr.ParseCIDR(sc)
-				if err == nil {
-					secondaryCIDRs = append(secondaryCIDRs, c)
+				if sc.IsValid() {
+					secondaryCIDRs = append(secondaryCIDRs, cidr.NewCIDR(netipx.PrefixIPNet(sc.Masked())))
 				}
 			}
 			return
@@ -357,6 +356,17 @@ func (n *nodeStore) hasMinimumIPsInPool(localNodeStore *node.LocalNodeStore) (mi
 	}
 
 	return
+}
+
+func (n *nodeStore) staticIPStatus() (requested bool, assigned string) {
+	n.mutex.RLock()
+	defer n.mutex.RUnlock()
+
+	if n.ownNode == nil {
+		return false, ""
+	}
+
+	return len(n.ownNode.Spec.IPAM.StaticIPTags) > 0, n.ownNode.Status.IPAM.AssignedStaticIP
 }
 
 // deleteLocalNodeResource is called when the CiliumNode resource representing
@@ -663,7 +673,7 @@ type crdAllocator struct {
 	// represented as string
 	allocated ipamTypes.AllocationMap
 
-	// family is the address family this allocator is allocator for
+	// family is the address family this allocator is allocating for
 	family Family
 
 	conf        *option.DaemonConfig
@@ -709,10 +719,10 @@ func (a *crdAllocator) buildAllocationResult(addr netip.Addr, ipInfo *ipamTypes.
 		for _, iface := range a.store.ownNode.Status.Azure.Interfaces {
 			if iface.ID == ipInfo.Resource {
 				result.PrimaryMAC = iface.MAC
-				if gatewayIP, err := netip.ParseAddr(iface.Gateway); err == nil {
-					result.GatewayIP = gatewayIP
+				if iface.Gateway.IsValid() {
+					result.GatewayIP = iface.Gateway.Addr
 				}
-				if p, err := netip.ParsePrefix(iface.CIDR); err == nil {
+				if p := azureInterfaceCIDR(iface); p.IsValid() {
 					result.CIDRs = append(result.CIDRs, p)
 				}
 				// Add manually configured Native Routing CIDR
@@ -759,14 +769,15 @@ func (a *crdAllocator) buildAllocationResult(addr netip.Addr, ipInfo *ipamTypes.
 				continue
 			}
 			result.PrimaryMAC = eni.MACAddress
-			if p, err := netip.ParsePrefix(eni.VSwitch.CIDRBlock); err == nil {
+			if eni.VSwitch.CIDRBlock.IsValid() {
+				p := eni.VSwitch.CIDRBlock.Prefix
 				result.CIDRs = []netip.Prefix{p}
 
 				// AlibabaCloud reserves the third-to-last IP of the subnet for the gateway.
 				// Ref: https://www.alibabacloud.com/help/doc-detail/65398.html
 				result.GatewayIP = netipx.PrefixLastIP(p).Prev().Prev()
 			}
-			result.InterfaceNumber = strconv.Itoa(alibabaCloud.GetENIIndexFromTags(a.logger, eni.Tags))
+			result.InterfaceNumber = strconv.Itoa(alibabaCloudTypes.GetENIIndexFromTags(a.logger, eni.Tags))
 			return
 		}
 		return nil, fmt.Errorf("unable to find ENI %s", ipInfo.Resource)
@@ -928,7 +939,7 @@ func (a *crdAllocator) RestoreFinished() {
 	})
 }
 
-// NewIPNotAvailableInPoolError returns an error resprenting the given IP not
+// NewIPNotAvailableInPoolError returns an error representing the given IP not
 // being available in the IPAM pool.
 func NewIPNotAvailableInPoolError(addr netip.Addr) error {
 	return &ErrIPNotAvailableInPool{addr: addr}
@@ -957,4 +968,17 @@ func (e *ErrIPNotAvailableInPool) Is(target error) bool {
 		return false
 	}
 	return t.addr == e.addr
+}
+
+// azureInterfaceCIDR returns Subnet.CIDR, falling back to the deprecated
+// AzureInterface.CIDR for CiliumNodes written by operators predating the
+// Subnet.CIDR migration.
+//
+// TODO(https://github.com/cilium/cilium/issues/46074): remove once
+// AzureInterface.CIDR is deleted.
+func azureInterfaceCIDR(iface azureTypes.AzureInterface) netip.Prefix {
+	if iface.Subnet.CIDR.IsValid() {
+		return iface.Subnet.CIDR.Prefix
+	}
+	return iface.CIDR.Prefix //nolint:staticcheck // fallback for operators predating the Subnet.CIDR migration
 }

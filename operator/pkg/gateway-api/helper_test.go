@@ -98,6 +98,14 @@ func readInput(t *testing.T, file string) []client.Object {
 			obj := &gatewayv1.TLSRoute{}
 			fromYaml(t, o, obj)
 			res = append(res, obj)
+		case "TCPRoute":
+			obj := &gatewayv1.TCPRoute{}
+			fromYaml(t, o, obj)
+			res = append(res, obj)
+		case "UDPRoute":
+			obj := &gatewayv1.UDPRoute{}
+			fromYaml(t, o, obj)
+			res = append(res, obj)
 		case "GRPCRoute":
 			obj := &gatewayv1.GRPCRoute{}
 			fromYaml(t, o, obj)
@@ -120,6 +128,14 @@ func readInput(t *testing.T, file string) []client.Object {
 			res = append(res, obj)
 		case "BackendTLSPolicy":
 			obj := &gatewayv1.BackendTLSPolicy{}
+			fromYaml(t, o, obj)
+			res = append(res, obj)
+		case "Node":
+			obj := &corev1.Node{}
+			fromYaml(t, o, obj)
+			res = append(res, obj)
+		case "ListenerSet":
+			obj := &gatewayv1.ListenerSet{}
 			fromYaml(t, o, obj)
 			res = append(res, obj)
 		}

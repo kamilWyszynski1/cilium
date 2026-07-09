@@ -7,22 +7,23 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 
 	"github.com/google/uuid"
 
-	eniTypes "github.com/cilium/cilium/pkg/alibabacloud/eni/types"
 	"github.com/cilium/cilium/pkg/alibabacloud/types"
+	iputil "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipam/service/ipallocator"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	"github.com/cilium/cilium/pkg/lock"
 )
 
 // ENIMap is a map of ENI interfaced indexed by ENI ID
-type ENIMap map[string]*eniTypes.ENI
+type ENIMap map[string]*types.ENI
 
 type API struct {
 	mutex          lock.RWMutex
-	unattached     map[string]*eniTypes.ENI
+	unattached     map[string]*types.ENI
 	enis           map[string]ENIMap
 	subnets        map[string]*ipamTypes.Subnet
 	vpcs           map[string]*ipamTypes.VirtualNetwork
@@ -33,7 +34,7 @@ type API struct {
 // NewAPI returns a new mocked ECS API
 func NewAPI(subnets []*ipamTypes.Subnet, vpcs []*ipamTypes.VirtualNetwork, securityGroups []*types.SecurityGroup) *API {
 	api := &API{
-		unattached:     map[string]*eniTypes.ENI{},
+		unattached:     map[string]*types.ENI{},
 		enis:           map[string]ENIMap{},
 		subnets:        map[string]*ipamTypes.Subnet{},
 		vpcs:           map[string]*ipamTypes.VirtualNetwork{},
@@ -98,15 +99,19 @@ func (a *API) GetInstance(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap,
 		for ifaceID, eni := range enis {
 			if subnets != nil {
 				if subnet, ok := subnets[eni.VSwitch.VSwitchID]; ok && subnet.CIDR.IsValid() {
-					eni.VSwitch.CIDRBlock = subnet.CIDR.String()
+					eni.VSwitch.CIDRBlock = iputil.PrefixFrom(subnet.CIDR)
 					eni.ZoneID = subnet.AvailabilityZone
 				}
 			}
 
 			if vpcs != nil {
 				if vpc, ok := vpcs[eni.VPC.VPCID]; ok {
-					eni.VPC.CIDRBlock = vpc.PrimaryCIDR
-					eni.VPC.SecondaryCIDRs = vpc.CIDRs
+					if vpc.PrimaryCIDR.IsValid() {
+						eni.VPC.CIDRBlock = vpc.PrimaryCIDR
+					}
+					if len(vpc.CIDRs) > 0 {
+						eni.VPC.SecondaryCIDRs = slices.Clone(vpc.CIDRs)
+					}
 				}
 			}
 
@@ -127,15 +132,19 @@ func (a *API) GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap
 		for _, eni := range enis {
 			if subnets != nil {
 				if subnet, ok := subnets[eni.VSwitch.VSwitchID]; ok && subnet.CIDR.IsValid() {
-					eni.VSwitch.CIDRBlock = subnet.CIDR.String()
+					eni.VSwitch.CIDRBlock = iputil.PrefixFrom(subnet.CIDR)
 					eni.ZoneID = subnet.AvailabilityZone
 				}
 			}
 
 			if vpcs != nil {
 				if vpc, ok := vpcs[eni.VPC.VPCID]; ok {
-					eni.VPC.CIDRBlock = vpc.PrimaryCIDR
-					eni.VPC.SecondaryCIDRs = vpc.CIDRs
+					if vpc.PrimaryCIDR.IsValid() {
+						eni.VPC.CIDRBlock = vpc.PrimaryCIDR
+					}
+					if len(vpc.CIDRs) > 0 {
+						eni.VPC.SecondaryCIDRs = slices.Clone(vpc.CIDRs)
+					}
 				}
 			}
 
@@ -192,7 +201,7 @@ func (a *API) GetSecurityGroups(ctx context.Context) (types.SecurityGroupMap, er
 	return securityGroups, nil
 }
 
-func (a *API) CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCount int, vSwitchID string, groups []string, tags map[string]string) (string, *eniTypes.ENI, error) {
+func (a *API) CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCount int, vSwitchID string, groups []string, tags map[string]string) (string, *types.ENI, error) {
 	a.mutex.Lock()
 	defer a.mutex.Unlock()
 
@@ -205,13 +214,13 @@ func (a *API) CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCoun
 	}
 
 	eniID := uuid.New().String()
-	eni := &eniTypes.ENI{
+	eni := &types.ENI{
 		NetworkInterfaceID: eniID,
-		VSwitch: eniTypes.VSwitch{
+		VSwitch: types.VSwitch{
 			VSwitchID: vSwitchID,
-			CIDRBlock: vsw.CIDR.String(),
+			CIDRBlock: iputil.PrefixFrom(vsw.CIDR),
 		},
-		Type:             eniTypes.ENITypeSecondary,
+		Type:             types.ENITypeSecondary,
 		SecurityGroupIDs: groups,
 		Tags:             tags,
 	}
@@ -221,12 +230,12 @@ func (a *API) CreateNetworkInterface(ctx context.Context, secondaryPrivateIPCoun
 			panic("Unable to allocate IP from allocator")
 		}
 		primary := false
-		if eni.PrimaryIPAddress == "" {
-			eni.PrimaryIPAddress = ip.String()
+		if !eni.PrimaryIPAddress.IsValid() {
+			eni.PrimaryIPAddress = iputil.AddrFrom(ip)
 			primary = true
 		}
-		eni.PrivateIPSets = append(eni.PrivateIPSets, eniTypes.PrivateIPSet{
-			PrivateIpAddress: ip.String(),
+		eni.PrivateIPSets = append(eni.PrivateIPSets, types.PrivateIPSet{
+			PrivateIpAddress: iputil.AddrFrom(ip),
 			Primary:          primary,
 		})
 	}
@@ -295,12 +304,12 @@ func (a *API) AssignPrivateIPAddresses(ctx context.Context, eniID string, toAllo
 					panic("Unable to allocate IP from allocator")
 				}
 				primary := false
-				if eni.PrimaryIPAddress == "" {
-					eni.PrimaryIPAddress = ip.String()
+				if !eni.PrimaryIPAddress.IsValid() {
+					eni.PrimaryIPAddress = iputil.AddrFrom(ip)
 					primary = true
 				}
-				eni.PrivateIPSets = append(eni.PrivateIPSets, eniTypes.PrivateIPSet{
-					PrivateIpAddress: ip.String(),
+				eni.PrivateIPSets = append(eni.PrivateIPSets, types.PrivateIPSet{
+					PrivateIpAddress: iputil.AddrFrom(ip),
 					Primary:          primary,
 				})
 			}
@@ -334,18 +343,17 @@ func (a *API) UnassignPrivateIPAddresses(ctx context.Context, eniID string, addr
 			return fmt.Errorf("vSwitch %s not found", eni.VSwitch.VSwitchID)
 		}
 
-		addressesAfterRelease := []eniTypes.PrivateIPSet{}
+		addressesAfterRelease := []types.PrivateIPSet{}
 
 		for _, address := range eni.PrivateIPSets {
 			if address.Primary {
 				continue
 			}
-			_, ok := releaseMap[address.PrivateIpAddress]
+			_, ok := releaseMap[address.PrivateIpAddress.String()]
 			if !ok {
 				addressesAfterRelease = append(addressesAfterRelease, address)
 			} else {
-				addr, _ := netip.ParseAddr(address.PrivateIpAddress)
-				a.allocator.Release(addr)
+				a.allocator.Release(address.PrivateIpAddress.Addr)
 				subnet.AvailableAddresses++
 			}
 		}

@@ -13,6 +13,7 @@ import (
 	cniVersion "github.com/containernetworking/cni/pkg/version"
 	"github.com/vishvananda/netlink"
 
+	"github.com/cilium/cilium/api/v1/client/daemon"
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/client"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
@@ -266,8 +267,7 @@ func (f *GenericVethChainer) Add(ctx context.Context, pluginCtx chainingapi.Plug
 }
 
 func (f *GenericVethChainer) Delete(ctx context.Context, pluginCtx chainingapi.PluginContext, delClient *lib.DeletionFallbackClient) (err error) {
-	req := &models.EndpointBatchDeleteRequest{ContainerID: pluginCtx.Args.ContainerID}
-	if err := delClient.EndpointDeleteMany(req); err != nil {
+	if err := delClient.EndpointDelete(pluginCtx.Args.ContainerID, pluginCtx.Args.IfName); err != nil {
 		if errors.Is(err, lib.ErrClientFailure) {
 			pluginCtx.Logger.Error("Failed to delete endpoint", logfields.Error, err)
 			return err
@@ -307,7 +307,7 @@ func (f *GenericVethChainer) Check(ctx context.Context, pluginCtx chainingapi.Pl
 }
 
 func (f *GenericVethChainer) Status(ctx context.Context, pluginCtx chainingapi.PluginContext, cli *client.Client) error {
-	if _, err := cli.Daemon.GetHealthz(nil); err != nil {
+	if _, err := cli.Daemon.GetHealthzContext(ctx, daemon.NewGetHealthzParams()); err != nil {
 		return cniTypes.NewError(types.CniErrPluginNotAvailable, "DaemonHealthzFailed",
 			fmt.Sprintf("Cilium agent healthz check failed: %s", client.Hint(err)))
 	}

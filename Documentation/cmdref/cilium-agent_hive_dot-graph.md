@@ -134,6 +134,7 @@ cilium-agent hive dot-graph [flags]
       --envoy-node-locality-enabled                               Enable Envoy node-locality support for zone-aware routing
       --envoy-policy-restore-timeout duration                     Maximum time to wait for endpoint policy restoration before starting serving resources to Envoy (default 3m0s)
       --envoy-secrets-namespace string                            EnvoySecretsNamespace is the namespace having secrets used by CEC
+      --envoy-xds-mode string                                     xDS server implementation for Envoy proxy configuration. Valid values are "split" for the existing per-resource-type xDS server, "ads" for the ADS (Aggregated Discovery Service) xDS server, or "strict-ads" for ADS with strict snapshot cache behavior and generated snapshot consistency checks (default "split")
       --force-device-detection                                    Forces the auto-detection of devices, even if specific devices are explicitly listed
       --gateway-api-secrets-namespace string                      GatewayAPISecretsNamespace is the namespace having tls secrets used by CEC, originating from Gateway API
       --gops-port uint16                                          Port for gops server to listen on (default 9890)
@@ -251,6 +252,7 @@ cilium-agent hive dot-graph [flags]
       --prometheus-serve-addr string                              IP:Port on which to serve prometheus metrics (pass ":Port" to bind on all interfaces, "" is off)
       --proxy-admin-port int                                      Port to serve Envoy admin interface on.
       --proxy-cluster-max-connections uint32                      Maximum number of connections on Envoy clusters (default 1024)
+      --proxy-cluster-max-pending-requests uint32                 Maximum number of pending requests on Envoy clusters (default 1024)
       --proxy-cluster-max-requests uint32                         Maximum number of requests on Envoy clusters (default 1024)
       --proxy-connect-timeout uint                                Time after which a TCP connect attempt is considered failed unless completed (in seconds) (default 2)
       --proxy-gid uint                                            Group ID for proxy control plane sockets. (default 1337)

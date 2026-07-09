@@ -137,7 +137,7 @@ func (r *gammaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	setGammaServiceAccepted(svc, true, "Gamma Service has routes attached", CiliumGammaReasonAccepted)
 
-	cec, _, cep, err := r.translator.Translate(&model.Model{HTTP: httpListeners})
+	cec, _, ceps, err := r.translator.Translate(&model.Model{HTTP: httpListeners})
 	if err != nil {
 		scopedLog.ErrorContext(ctx, "Unable to translate resources", logfields.Error, err)
 		return r.handleReconcileErrorWithStatus(ctx, err, originalSvc, svc)
@@ -148,9 +148,13 @@ func (r *gammaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return r.handleReconcileErrorWithStatus(ctx, err, originalSvc, svc)
 	}
 
-	if err = r.ensureEndpointSlice(ctx, cep); err != nil {
-		scopedLog.ErrorContext(ctx, "Unable to ensure Endpoints", logfields.Error, err)
-		return r.handleReconcileErrorWithStatus(ctx, err, originalSvc, svc)
+	// GAMMA only ever produces a single dummy EndpointSlice; unwrap from the
+	// shared Translator interface that returns a list to support gateway-api L4.
+	if len(ceps) > 0 {
+		if err = r.ensureEndpointSlice(ctx, ceps[0]); err != nil {
+			scopedLog.ErrorContext(ctx, "Unable to ensure Endpoints", logfields.Error, err)
+			return r.handleReconcileErrorWithStatus(ctx, err, originalSvc, svc)
+		}
 	}
 
 	setGammaServiceProgrammed(svc, true, "Gamma Service has been programmed", CiliumGammaReasonProgrammed)
@@ -167,6 +171,7 @@ func (r *gammaReconciler) setHTTPRouteStatuses(gammaLogger *slog.Logger, ctx con
 	for httpRouteIndex, original := range httpRoutes.Items {
 
 		hr := original.DeepCopy()
+		hr.Status.Parents = pruneRouteParentStatuses(hr.Status.Parents, hr.Spec.ParentRefs, r.controllerName)
 
 		hrName := types.NamespacedName{
 			Name:      hr.Name,
@@ -174,11 +179,12 @@ func (r *gammaReconciler) setHTTPRouteStatuses(gammaLogger *slog.Logger, ctx con
 		}
 		// input for the validators
 		i := &routechecks.HTTPRouteInput{
-			Ctx:       ctx,
-			Logger:    gammaLogger.With(httpRoute, hrName),
-			Client:    r.Client,
-			Grants:    grants,
-			HTTPRoute: hr,
+			Ctx:            ctx,
+			Logger:         gammaLogger.With(httpRoute, hrName),
+			Client:         r.Client,
+			Grants:         grants,
+			HTTPRoute:      hr,
+			ControllerName: r.controllerName,
 		}
 
 		// Route validators
@@ -247,7 +253,7 @@ func (r *gammaReconciler) setHTTPRouteStatuses(gammaLogger *slog.Logger, ctx con
 func (r *gammaReconciler) filterHTTPRoutesByService(ctx context.Context, gammaService *corev1.Service, routes []gatewayv1.HTTPRoute) []gatewayv1.HTTPRoute {
 	var filtered []gatewayv1.HTTPRoute
 	for _, route := range routes {
-		if helpers.IsParentAttachable(ctx, gammaService, &route, route.Status.Parents) {
+		if helpers.IsParentAttachable(ctx, gammaService, &route, route.Status.Parents, nil) {
 			filtered = append(filtered, route)
 		}
 	}
@@ -257,7 +263,7 @@ func (r *gammaReconciler) filterHTTPRoutesByService(ctx context.Context, gammaSe
 func (r *gammaReconciler) filterGRPCRoutesByService(ctx context.Context, gammaService *corev1.Service, routes []gatewayv1.GRPCRoute) []gatewayv1.GRPCRoute {
 	var filtered []gatewayv1.GRPCRoute
 	for _, route := range routes {
-		if helpers.IsParentAttachable(ctx, gammaService, &route, route.Status.Parents) {
+		if helpers.IsParentAttachable(ctx, gammaService, &route, route.Status.Parents, nil) {
 			filtered = append(filtered, route)
 		}
 	}
@@ -269,6 +275,7 @@ func (r *gammaReconciler) setGRPCRouteStatuses(gammaLogger *slog.Logger, ctx con
 	for grpcRouteIndex, original := range grpcRoutes.Items {
 
 		grpc := original.DeepCopy()
+		grpc.Status.Parents = pruneRouteParentStatuses(grpc.Status.Parents, grpc.Spec.ParentRefs, r.controllerName)
 
 		grpcName := types.NamespacedName{
 			Name:      grpc.Name,
@@ -276,11 +283,12 @@ func (r *gammaReconciler) setGRPCRouteStatuses(gammaLogger *slog.Logger, ctx con
 		}
 		// input for the validators
 		i := &routechecks.GRPCRouteInput{
-			Ctx:       ctx,
-			Logger:    gammaLogger.With(grpcRoute, grpcName),
-			Client:    r.Client,
-			Grants:    grants,
-			GRPCRoute: grpc,
+			Ctx:            ctx,
+			Logger:         gammaLogger.With(grpcRoute, grpcName),
+			Client:         r.Client,
+			Grants:         grants,
+			GRPCRoute:      grpc,
+			ControllerName: r.controllerName,
 		}
 
 		// Route validators
