@@ -220,8 +220,6 @@ rules:
   resources:
   - ciliumendpointslices
   - ciliumenvoyconfigs
-  - ciliumbgpclusterconfigs
-  - ciliumbgpnodeconfigoverrides
   - ciliumbgppeerconfigs
   - ciliumbgpadvertisements
   - ciliumbgpnodeconfigs
@@ -283,23 +281,18 @@ rules:
   - serviceexports.multicluster.x-k8s.io
 {{- end }}
   - ciliumdatapathplugins.cilium.io
-- apiGroups:
-  - apiextensions.k8s.io
-  resources:
-  - customresourcedefinitions/status
-  verbs:
-  - update
-  resourceNames:
-  - ciliumbgpclusterconfigs.cilium.io
-  - ciliumbgppeerconfigs.cilium.io
-  - ciliumbgpadvertisements.cilium.io
-  - ciliumbgpnodeconfigs.cilium.io
-  - ciliumbgpnodeconfigoverrides.cilium.io
+{{- if .Values.networkDriver.enabled }}
+  - ciliumnetworkdrivernodeconfigs.cilium.io
+  - ciliumnetworkdriverclusterconfigs.cilium.io
+  - ciliumresourceippools.cilium.io
+{{- end }}
 - apiGroups:
   - cilium.io
   resources:
   - ciliumloadbalancerippools
   - ciliumpodippools
+  - ciliumbgpclusterconfigs
+  - ciliumbgpnodeconfigoverrides
   - ciliumbgppeerconfigs
   - ciliumdatapathplugins
   verbs:
@@ -481,4 +474,32 @@ rules:
   - ciliumendpointslices
   verbs:
   - deletecollection
+{{- if .Values.networkDriver.enabled }}
+- apiGroups:
+  - cilium.io
+  resources:
+  - ciliumnetworkdriverclusterconfigs
+  - ciliumresourceippools
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cilium.io
+  resources:
+  - ciliumnetworkdriverclusterconfigs/status
+  verbs:
+  - update
+  - patch
+- apiGroups:
+  - cilium.io
+  resources:
+  - ciliumnetworkdrivernodeconfigs
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - delete
+{{- end }}
 {{- end }}

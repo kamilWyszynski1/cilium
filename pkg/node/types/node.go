@@ -13,9 +13,9 @@ import (
 	"strings"
 
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/pkg/cidr"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/defaults"
+	iputil "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/node/addressing"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
@@ -47,27 +47,27 @@ type Node struct {
 
 	// IPv4AllocCIDR if set, is the IPv4 address pool out of which the node
 	// allocates IPs for local endpoints from
-	IPv4AllocCIDR *cidr.CIDR
+	IPv4AllocCIDR Prefix
 
 	// IPv4SecondaryAllocCIDRs contains additional IPv4 CIDRs from which this
 	// node allocates IPs for its local endpoints from
-	IPv4SecondaryAllocCIDRs []*cidr.CIDR
+	IPv4SecondaryAllocCIDRs []Prefix
 
 	// IPv6AllocCIDR if set, is the IPv6 address pool out of which the node
 	// allocates IPs for local endpoints from
-	IPv6AllocCIDR *cidr.CIDR
+	IPv6AllocCIDR Prefix
 
 	// IPv6SecondaryAllocCIDRs contains additional IPv6 CIDRs from which this
 	// node allocates IPs for its local endpoints from
-	IPv6SecondaryAllocCIDRs []*cidr.CIDR
+	IPv6SecondaryAllocCIDRs []Prefix
 
-	// IPv4HealthIP if not nil, this is the IPv4 address of the
+	// IPv4HealthIP if set, this is the IPv4 address of the
 	// cilium-health endpoint located on the node.
-	IPv4HealthIP net.IP
+	IPv4HealthIP iputil.Addr
 
-	// IPv6HealthIP if not nil, this is the IPv6 address of the
+	// IPv6HealthIP if set, this is the IPv6 address of the
 	// cilium-health endpoint located on the node.
-	IPv6HealthIP net.IP
+	IPv6HealthIP iputil.Addr
 
 	// IPv4IngressIP if not nil, this is the IPv4 address of the
 	// Ingress listener on the node.
@@ -307,10 +307,10 @@ func (n *Node) getPrimaryAddress() *models.NodeAddressing {
 	v6 := n.GetNodeIP(true)
 
 	var ipv4AllocStr, ipv6AllocStr string
-	if n.IPv4AllocCIDR != nil {
+	if n.IPv4AllocCIDR.IsValid() {
 		ipv4AllocStr = n.IPv4AllocCIDR.String()
 	}
-	if n.IPv6AllocCIDR != nil {
+	if n.IPv6AllocCIDR.IsValid() {
 		ipv6AllocStr = n.IPv6AllocCIDR.String()
 	}
 
@@ -359,15 +359,15 @@ func (n *Node) getSecondaryAddresses() []*models.NodeAddressingElement {
 }
 
 func (n *Node) getHealthAddresses() *models.NodeAddressing {
-	if n.IPv4HealthIP == nil && n.IPv6HealthIP == nil {
+	if !n.IPv4HealthIP.IsValid() && !n.IPv6HealthIP.IsValid() {
 		return nil
 	}
 
 	var v4Str, v6Str string
-	if n.IPv4HealthIP != nil {
+	if n.IPv4HealthIP.IsValid() {
 		v4Str = n.IPv4HealthIP.String()
 	}
-	if n.IPv6HealthIP != nil {
+	if n.IPv6HealthIP.IsValid() {
 		v6Str = n.IPv6HealthIP.String()
 	}
 
@@ -438,24 +438,28 @@ func (n *Node) IsLocal() bool {
 	return n != nil && n.Name == GetName() && n.Cluster == getCluster()
 }
 
-func (n *Node) GetIPv4AllocCIDRs() []*cidr.CIDR {
-	result := make([]*cidr.CIDR, 0, len(n.IPv4SecondaryAllocCIDRs)+1)
-	if n.IPv4AllocCIDR != nil {
-		result = append(result, n.IPv4AllocCIDR)
+func (n *Node) GetIPv4AllocCIDRs() []netip.Prefix {
+	result := make([]netip.Prefix, 0, len(n.IPv4SecondaryAllocCIDRs)+1)
+	if n.IPv4AllocCIDR.IsValid() {
+		result = append(result, n.IPv4AllocCIDR.Prefix.Prefix)
 	}
-	if len(n.IPv4SecondaryAllocCIDRs) > 0 {
-		result = append(result, n.IPv4SecondaryAllocCIDRs...)
+	for _, c := range n.IPv4SecondaryAllocCIDRs {
+		if c.IsValid() {
+			result = append(result, c.Prefix.Prefix)
+		}
 	}
 	return result
 }
 
-func (n *Node) GetIPv6AllocCIDRs() []*cidr.CIDR {
-	result := make([]*cidr.CIDR, 0, len(n.IPv6SecondaryAllocCIDRs)+1)
-	if n.IPv6AllocCIDR != nil {
-		result = append(result, n.IPv6AllocCIDR)
+func (n *Node) GetIPv6AllocCIDRs() []netip.Prefix {
+	result := make([]netip.Prefix, 0, len(n.IPv6SecondaryAllocCIDRs)+1)
+	if n.IPv6AllocCIDR.IsValid() {
+		result = append(result, n.IPv6AllocCIDR.Prefix.Prefix)
 	}
-	if len(n.IPv6SecondaryAllocCIDRs) > 0 {
-		result = append(result, n.IPv6SecondaryAllocCIDRs...)
+	for _, c := range n.IPv6SecondaryAllocCIDRs {
+		if c.IsValid() {
+			result = append(result, c.Prefix.Prefix)
+		}
 	}
 	return result
 }

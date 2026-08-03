@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -20,7 +21,6 @@ import (
 	"github.com/cilium/statedb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go4.org/netipx"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,7 +32,6 @@ import (
 
 	"github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/annotation"
-	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/hive"
 	iputil "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipam/podippool"
@@ -875,14 +874,6 @@ func Test_MultiPoolManager_ReleaseUnusedCIDR_PreAlloc(t *testing.T) {
 	}
 }
 
-// toCIDR converts a netip.Prefix into a *cidr.CIDR for assertions that compare
-// against LocalNode.{IPv4,IPv6}AllocCIDR / {IPv4,IPv6}SecondaryAllocCIDRs.
-// The prefix is masked to match net.ParseCIDR semantics used to populate
-// those fields.
-func toCIDR(p netip.Prefix) *cidr.CIDR {
-	return cidr.NewCIDR(netipx.PrefixIPNet(p.Masked()))
-}
-
 func Test_LocalNodeCIDRsSyncer(t *testing.T) {
 	var (
 		tick    = 10 * time.Millisecond
@@ -963,19 +954,19 @@ func Test_LocalNodeCIDRsSyncer(t *testing.T) {
 		localNode, err := localNodeStore.Get(t.Context())
 		assert.NoError(c, err)
 		assert.Equalf(c,
-			toCIDR(defaultIPv4CIDR1), localNode.IPv4AllocCIDR,
+			nodeTypes.PrefixFrom(defaultIPv4CIDR1), localNode.IPv4AllocCIDR,
 			"IPv4 primary allocation CIDR do not match",
 		)
 		assert.ElementsMatch(c,
-			localNode.IPv4SecondaryAllocCIDRs, []*cidr.CIDR{toCIDR(marsIPv4CIDR1)},
+			localNode.IPv4SecondaryAllocCIDRs, []nodeTypes.Prefix{nodeTypes.PrefixFrom(marsIPv4CIDR1)},
 			"IPv4 secondary allocation CIDRs do not match",
 		)
 		assert.Equalf(c,
-			toCIDR(defaultIPv6CIDR1), localNode.IPv6AllocCIDR,
+			nodeTypes.PrefixFrom(defaultIPv6CIDR1), localNode.IPv6AllocCIDR,
 			"IPv6 primary allocation CIDR do not match",
 		)
 		assert.ElementsMatch(c,
-			localNode.IPv6SecondaryAllocCIDRs, []*cidr.CIDR{toCIDR(marsIPv6CIDR1)},
+			localNode.IPv6SecondaryAllocCIDRs, []nodeTypes.Prefix{nodeTypes.PrefixFrom(marsIPv6CIDR1)},
 			"IPv6 secondary allocation CIDRs do not match",
 		)
 	}, timeout, tick)
@@ -1000,19 +991,19 @@ func Test_LocalNodeCIDRsSyncer(t *testing.T) {
 		localNode, err := localNodeStore.Get(t.Context())
 		assert.NoError(c, err)
 		assert.Equalf(c,
-			toCIDR(defaultIPv4CIDR1), localNode.IPv4AllocCIDR,
+			nodeTypes.PrefixFrom(defaultIPv4CIDR1), localNode.IPv4AllocCIDR,
 			"IPv4 primary allocation CIDR do not match",
 		)
 		assert.ElementsMatch(c,
-			localNode.IPv4SecondaryAllocCIDRs, []*cidr.CIDR{toCIDR(marsIPv4CIDR1), toCIDR(jupiterIPv4CIDR)},
+			localNode.IPv4SecondaryAllocCIDRs, []nodeTypes.Prefix{nodeTypes.PrefixFrom(marsIPv4CIDR1), nodeTypes.PrefixFrom(jupiterIPv4CIDR)},
 			"IPv4 secondary allocation CIDRs do not match",
 		)
 		assert.Equalf(c,
-			toCIDR(defaultIPv6CIDR1), localNode.IPv6AllocCIDR,
+			nodeTypes.PrefixFrom(defaultIPv6CIDR1), localNode.IPv6AllocCIDR,
 			"IPv6 primary allocation CIDR do not match",
 		)
 		assert.ElementsMatch(c,
-			localNode.IPv6SecondaryAllocCIDRs, []*cidr.CIDR{toCIDR(marsIPv6CIDR1), toCIDR(jupiterIPv6CIDR)},
+			localNode.IPv6SecondaryAllocCIDRs, []nodeTypes.Prefix{nodeTypes.PrefixFrom(marsIPv6CIDR1), nodeTypes.PrefixFrom(jupiterIPv6CIDR)},
 			"IPv6 secondary allocation CIDRs do not match",
 		)
 	}, timeout, tick)
@@ -1037,7 +1028,7 @@ func Test_LocalNodeCIDRsSyncer(t *testing.T) {
 		localNode, err := localNodeStore.Get(t.Context())
 		assert.NoError(c, err)
 		assert.Equalf(c,
-			toCIDR(defaultIPv4CIDR1), localNode.IPv4AllocCIDR,
+			nodeTypes.PrefixFrom(defaultIPv4CIDR1), localNode.IPv4AllocCIDR,
 			"IPv4 primary allocation CIDR do not match",
 		)
 		assert.Empty(c,
@@ -1045,7 +1036,7 @@ func Test_LocalNodeCIDRsSyncer(t *testing.T) {
 			"IPv4 secondary allocation CIDRs do not match",
 		)
 		assert.Equalf(c,
-			toCIDR(defaultIPv6CIDR1), localNode.IPv6AllocCIDR,
+			nodeTypes.PrefixFrom(defaultIPv6CIDR1), localNode.IPv6AllocCIDR,
 			"IPv6 primary allocation CIDR do not match",
 		)
 		assert.Empty(c,
@@ -1476,6 +1467,43 @@ func TestMultiPoolManagerUpdatesFirstLastIPSettingsBeforeAllocation(t *testing.T
 	result, err := mgr.allocateIP(lastIP, "pod-a", "default", IPv4, false)
 	require.NoError(t, err)
 	require.Equal(t, lastIP, result.IP)
+}
+
+func TestMultiPoolManagerWaitForAllPools(t *testing.T) {
+	poolA, poolB := Pool("pool-a"), Pool("pool-b")
+
+	synctest.Test(t, func(t *testing.T) {
+		mgr := &multiPoolManager{
+			logger:                 hivetest.Logger(t),
+			ipv4Enabled:            true,
+			preallocatedIPsPerPool: preAllocatePerPool{poolA: 8, poolB: 0},
+			pools:                  map[Pool]*poolPair{},
+			poolsUpdated:           make(chan struct{}, 1),
+		}
+
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			mgr.waitForAllPools()
+		})
+
+		// wait until waitForAllPools is blocked on poolA
+		synctest.Wait()
+
+		// unblock waitForAllPools by adding poolA, but not poolB (which has zero preallocation)
+		mgr.poolsMutex.Lock()
+		mgr.upsertPoolLocked(poolA, []iputil.Prefix{
+			iputil.PrefixFrom(netip.MustParsePrefix("10.0.0.0/30")),
+		}, false, false)
+		mgr.poolsMutex.Unlock()
+
+		// wait for waitForAllPools to unblock
+		wg.Wait()
+
+		mgr.poolsMutex.Lock()
+		require.Contains(t, mgr.pools, poolA)
+		require.NotContains(t, mgr.pools, poolB)
+		mgr.poolsMutex.Unlock()
+	})
 }
 
 func Test_multiPoolManager_staticIPStatus(t *testing.T) {

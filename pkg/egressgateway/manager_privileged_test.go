@@ -135,11 +135,6 @@ func (v *parsedEgressRule) String() string {
 		v.sourceIP.String(), v.destCIDR.String(), v.gatewayIP.String(), v.egressIP.String())
 }
 
-type rpFilterSetting struct {
-	iFaceName       string
-	rpFilterSetting string
-}
-
 type EgressGatewayTestSuite struct {
 	manager   *Manager
 	policies  fakeResource[*Policy]
@@ -166,7 +161,6 @@ func setupEgressGatewayTestSuite(t *testing.T) *EgressGatewayTestSuite {
 	k.sysctl = sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc")
 
 	lc := hivetest.Lifecycle(t)
-	policyMap4 := egressmap.CreatePrivatePolicyMap4(lc, nil, egressmap.DefaultPolicyConfig)
 	policyMap4V2 := egressmap.CreatePrivatePolicyMap4V2(lc, nil, egressmap.DefaultPolicyConfig)
 	policyMap6 := egressmap.CreatePrivatePolicyMap6(lc, nil, egressmap.DefaultPolicyConfig)
 
@@ -200,7 +194,6 @@ func setupEgressGatewayTestSuite(t *testing.T) *EgressGatewayTestSuite {
 		Config:            Config{1 * time.Millisecond},
 		DaemonConfig:      &option.DaemonConfig{},
 		IdentityAllocator: identityAllocator,
-		PolicyMap4:        policyMap4,
 		PolicyMap4V2:      policyMap4V2,
 		PolicyMap6:        policyMap6,
 		Policies:          k.policies,
@@ -505,10 +498,6 @@ func TestPrivilegedEgressGatewayManager(t *testing.T) {
 
 	addPolicyAndReconcile(t, egressGatewayManager, k.policies, &policy1)
 
-	assertRPFilter(t, k.sysctl, []rpFilterSetting{
-		{iFaceName: testInterface1, rpFilterSetting: "2"},
-		{iFaceName: testInterface2, rpFilterSetting: "1"},
-	})
 	assertEgressRules4(t, policyMap4, []egressRule{})
 
 	// Add a new endpoint & ID which matches policy-1
@@ -1345,25 +1334,6 @@ func tryAssertEgressRules6(policyMap egressmap.PolicyMap6, rules []egressRule) e
 
 	if untrackedRule {
 		return fmt.Errorf("Untracked egress policy")
-	}
-
-	return nil
-}
-
-func assertRPFilter(t *testing.T, sysctl sysctl.Sysctl, rpFilterSettings []rpFilterSetting) {
-	t.Helper()
-
-	err := tryAssertRPFilterSettings(sysctl, rpFilterSettings)
-	require.NoError(t, err)
-}
-
-func tryAssertRPFilterSettings(sysctl sysctl.Sysctl, rpFilterSettings []rpFilterSetting) error {
-	for _, setting := range rpFilterSettings {
-		if val, err := sysctl.Read([]string{"net", "ipv4", "conf", setting.iFaceName, "rp_filter"}); err != nil {
-			return fmt.Errorf("failed to read rp_filter")
-		} else if val != setting.rpFilterSetting {
-			return fmt.Errorf("mismatched rp_filter iface: %s rp_filter: %s", setting.iFaceName, val)
-		}
 	}
 
 	return nil

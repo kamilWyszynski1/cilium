@@ -509,10 +509,10 @@ func TestRuleWithNoEndpointSelector(t *testing.T) {
 				IngressCommonRule: api.IngressCommonRule{
 					FromCIDR: []api.CIDR{
 						"10.0.1.0/24",
-						"192.168.2.0",
-						"10.0.3.1",
+						"192.168.2.0/32",
+						"10.0.3.1/32",
 						"2001:db8::1/48",
-						"2001:db9::",
+						"2001:db9::/128",
 					},
 				},
 			},
@@ -546,10 +546,10 @@ func TestL3Policy(t *testing.T) {
 				IngressCommonRule: api.IngressCommonRule{
 					FromCIDR: []api.CIDR{
 						"10.0.1.0/24",
-						"192.168.2.0",
-						"10.0.3.1",
+						"192.168.2.0/32",
+						"10.0.3.1/32",
 						"2001:db8::1/48",
-						"2001:db9::",
+						"2001:db9::/128",
 					},
 				},
 			},
@@ -1788,7 +1788,7 @@ func TestEgressL4AllowWorld(t *testing.T) {
 	require.Equal(t, uint16(80), filter.Port)
 	require.False(t, filter.Ingress)
 
-	require.Len(t, filter.PerSelectorPolicies, 3)
+	require.Len(t, filter.PerSelectorPolicies, 4)
 }
 
 func TestEgressL4AllowAllEntity(t *testing.T) {

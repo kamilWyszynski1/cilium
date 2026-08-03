@@ -67,8 +67,12 @@ env:
   test_name: gke-perf
   USE_GKE_GCLOUD_AUTH_PLUGIN: True
   gcp_zone: us-east5-a
+  # Additional zones to fall back to if the primary zone is out of capacity
+  # (GCE STOCKOUT). All within the same region as gcp_zone to keep perf results
+  # comparable.
+  gcp_fallback_zones: us-east5-b us-east5-c
   # renovate: datasource=docker depName=google/cloud-sdk
-  gcloud_version: 574.0.0
+  gcloud_version: 577.0.0
 
 jobs:
   echo-inputs:
@@ -94,7 +98,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -106,12 +110,18 @@ jobs:
           login-host: ${{ vars.DOCKER_READ_HOST }}
           login-username: ${{ vars.DOCKER_READ_USERNAME }}
           login-password: ${{ secrets.DOCKER_READ_PASSWORD }}
+          auth-required: ${{ vars.DOCKER_AUTH_REQUIRED }}
 
   installation-and-perf:
     name: Installation and Perf Test
     needs: wait-for-images
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Allow headroom for a zone fallback: a STOCKOUT can burn ~35m of
+    # provisioning wait per zone before we retry in the next one (partial
+    # clusters are torn down asynchronously, so a failed attempt adds little
+    # beyond that wait). This comfortably covers one fallback on top of the
+    # normal create + install + perf budget.
+    timeout-minutes: 120
     env:
       job_name: "Installation and Perf Test"
     strategy:
@@ -165,7 +175,7 @@ jobs:
           comment_on_pr: false
 
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -250,6 +260,7 @@ jobs:
         with:
           cluster-name: ${{ env.clusterName }}-${{ matrix.index }}
           zone: ${{ env.gcp_zone }}
+          fallback-zones: ${{ env.gcp_fallback_zones }}
           node-taints: ${{ steps.vars.outputs.node_taints }}
           labels: "usage=${{ github.repository_owner }}-${{ github.event.repository.name }},owner=${{ steps.vars.outputs.owner }}"
 
@@ -258,11 +269,11 @@ jobs:
         uses: ./.github/actions/gke-create-esp-rule
         with:
           cluster_name: ${{ env.clusterName }}-${{ matrix.index }}
-          cluster_zone: ${{ env.gcp_zone }}
+          cluster_zone: ${{ steps.create-cluster.outputs.zone }}
 
       - name: Get cluster credentials
         run: |
-          gcloud container clusters get-credentials ${{ env.clusterName }}-${{ matrix.index }} --zone ${{ env.gcp_zone }}
+          gcloud container clusters get-credentials ${{ env.clusterName }}-${{ matrix.index }} --zone ${{ steps.create-cluster.outputs.zone }}
 
       - name: Generate cilium-cli kubeconfig
         id: gen-kubeconfig
@@ -271,7 +282,7 @@ jobs:
           kubeconfig: "~/.kube/config"
 
       - name: Create imagePullSecret
-        if: ${{ matrix.mode != 'baseline' }}
+        if: ${{ vars.DOCKER_AUTH_REQUIRED == 'true' && matrix.mode != 'baseline' }}
         run: |
           kubectl create secret docker-registry cilium-registry \
             --namespace kube-system \
@@ -280,7 +291,7 @@ jobs:
             --docker-password="${{ secrets.DOCKER_READ_PASSWORD }}"
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@e391e739db83a8b888ecf18786af6853c51a0c58 # v0.19.5
+        uses: cilium/cilium-cli@7ca7fc53c20275f5c10ef5f3557076691fd1d720 # v0.19.7
         with:
           skip-build: ${{ env.CILIUM_CLI_SKIP_BUILD }}
           image-repo: ${{ env.CILIUM_CLI_IMAGE_REPO }}
@@ -329,15 +340,17 @@ jobs:
         uses: ./.github/actions/gke-clean-esp-rule
         with:
           cluster_name: ${{ env.clusterName }}-${{ matrix.index }}
-          cluster_zone: ${{ env.gcp_zone }}
+          cluster_zone: ${{ steps.create-cluster.outputs.zone || env.gcp_zone }}
 
       - name: Clean up GKE
         if: ${{ always() }}
+        env:
+          cluster_zone: ${{ steps.create-cluster.outputs.zone || env.gcp_zone }}
         run: |
-          while [ "$(gcloud container operations list --zone ${{ env.gcp_zone }} --filter="status=RUNNING AND targetLink~${{ env.clusterName }}-${{ matrix.index }}" --format="value(name)")" ];do
+          while [ "$(gcloud container operations list --zone ${cluster_zone} --filter="status=RUNNING AND targetLink~${{ env.clusterName }}-${{ matrix.index }}" --format="value(name)")" ];do
             echo "cluster has an ongoing operation, waiting for all operations to finish"; sleep 15
           done
-          gcloud container clusters delete ${{ env.clusterName }}-${{ matrix.index }} --zone ${{ env.gcp_zone }} --quiet --async
+          gcloud container clusters delete ${{ env.clusterName }}-${{ matrix.index }} --zone ${cluster_zone} --quiet --async
         shell: bash {0} # Disable default fail-fast behavior so that all commands run independently
 
       # We needed to configure a unique suffix to ensure that the artifacts can
@@ -350,7 +363,7 @@ jobs:
 
       - name: Export results and sysdump to GS bucket
         if: ${{ always() && steps.run-perf.outcome != 'skipped' && steps.run-perf.outcome != 'cancelled' }}
-        uses: cilium/scale-tests-action/export-results@688f70c8708f4bdd2ef04ad7710d35aaea1ea57c # main
+        uses: cilium/scale-tests-action/export-results@d89fc21b123f4047828366d1505a8bb5d414c07d # main
         with:
           test_name: ${{ env.test_name }}-${{ matrix.name }}
           tested_sha: ${{ inputs.SHA || github.sha }}

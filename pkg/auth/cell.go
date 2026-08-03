@@ -20,7 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	nodeManager "github.com/cilium/cilium/pkg/node/manager"
-	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/policy/compute"
 	"github.com/cilium/cilium/pkg/signal"
 	"github.com/cilium/cilium/pkg/time"
 )
@@ -66,6 +66,7 @@ type config struct {
 
 func (r config) Flags(flags *pflag.FlagSet) {
 	flags.Bool("mesh-auth-enabled", r.MeshAuthEnabled, "Enable authentication processing & garbage collection (beta)")
+	flags.MarkDeprecated("mesh-auth-enabled", "Mutual Auth is deprecated as of Cilium v1.20. See https://github.com/cilium/cilium/issues/47132 for details.")
 	flags.Int("mesh-auth-queue-size", r.MeshAuthQueueSize, "Queue size for the auth manager")
 	flags.Duration("mesh-auth-gc-interval", r.MeshAuthGCInterval, "Interval in which auth entries are attempted to be garbage collected")
 	flags.Duration("mesh-auth-signal-backoff-duration", r.MeshAuthSignalBackoffDuration, "Time to wait betweeen two authentication required signals in case of a cache mismatch")
@@ -98,7 +99,7 @@ type authManagerParams struct {
 	IdentityChanges stream.Observable[cache.IdentityChange]
 	NodeManager     nodeManager.NodeManager
 	EndpointManager endpointmanager.EndpointManager
-	PolicyRepo      policy.PolicyRepository
+	PolicyComputer  compute.PolicyRecomputer
 }
 
 func registerAuthManager(params authManagerParams) (*AuthManager, error) {
@@ -122,7 +123,7 @@ func registerAuthManager(params authManagerParams) (*AuthManager, error) {
 		return nil, fmt.Errorf("failed to create auth manager: %w", err)
 	}
 
-	mapGC := newAuthMapGC(params.Logger, mapCache, params.NodeIDHandler, params.PolicyRepo)
+	mapGC := newAuthMapGC(params.Logger, mapCache, params.NodeIDHandler, params.PolicyComputer)
 
 	// Register auth components to lifecycle hooks & jobs
 

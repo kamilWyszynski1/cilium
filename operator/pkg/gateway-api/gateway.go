@@ -14,7 +14,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	mcsapiv1beta1 "sigs.k8s.io/mcs-api/pkg/apis/v1beta1"
 
@@ -41,19 +40,21 @@ type gatewayReconciler struct {
 	Scheme     *runtime.Scheme
 	translator translation.Translator
 
-	logger         *slog.Logger
-	controllerName string
+	logger             *slog.Logger
+	controllerName     string
+	hostNetworkEnabled bool
 }
 
-func newGatewayReconciler(mgr ctrl.Manager, translator translation.Translator, logger *slog.Logger, controllerName string) *gatewayReconciler {
+func newGatewayReconciler(mgr ctrl.Manager, translator translation.Translator, logger *slog.Logger, controllerName string, hostNetworkEnabled bool) *gatewayReconciler {
 	scopedLog := logger.With(logfields.Controller, gateway)
 
 	return &gatewayReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		translator:     translator,
-		logger:         scopedLog,
-		controllerName: controllerName,
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		translator:         translator,
+		logger:             scopedLog,
+		controllerName:     controllerName,
+		hostNetworkEnabled: hostNetworkEnabled,
 	}
 }
 
@@ -77,11 +78,13 @@ func (r *gatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return fmt.Errorf("failed to setup field indexer %q: %w", indexName, err)
 		}
 	}
-
-	// Only index HTTPRoute by ServiceImport if ServiceImport is enabled
+	// Only index HTTPRoute and GRPCRoute by ServiceImport if ServiceImport is enabled
 	if serviceImportEnabled {
 		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &gatewayv1.HTTPRoute{}, indexers.BackendServiceImportHTTPRouteIndex, indexers.IndexHTTPRouteByBackendServiceImport); err != nil {
 			return fmt.Errorf("failed to setup field indexer %q: %w", indexers.BackendServiceImportHTTPRouteIndex, err)
+		}
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &gatewayv1.GRPCRoute{}, indexers.BackendServiceImportGRPCRouteIndex, indexers.IndexGRPCRouteByBackendServiceImport); err != nil {
+			return fmt.Errorf("failed to setup field indexer %q: %w", indexers.BackendServiceImportGRPCRouteIndex, err)
 		}
 	}
 
@@ -186,7 +189,7 @@ func (r *gatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(predicates.GatewayClassOwnedByController(r.controllerName))).
 		// Watch related backend Service for status
 		// LB Services are handled by the Owns call later.
-		Watches(&corev1.Service{}, watchhandlers.EnqueueRequestForBackendService(r.Client, *r.logger)).
+		Watches(&corev1.Service{}, watchhandlers.EnqueueRequestForBackendService(r.Client, r.Scheme, *r.logger, r.controllerName)).
 		// Watch HTTPRoute linked to Gateway
 		Watches(&gatewayv1.HTTPRoute{}, watchhandlers.EnqueueRequestForOwningHTTPRoute(r.Client, r.logger, r.controllerName)).
 		// Watch GRPCRoute linked to Gateway
@@ -195,18 +198,17 @@ func (r *gatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&gatewayv1.TLSRoute{}, watchhandlers.EnqueueRequestForOwningTLSRoute(r.Client, r.logger, r.controllerName)).
 		// Watch related secrets used to configure TLS
 		Watches(&corev1.Secret{},
-			watchhandlers.EnqueueRequestForTLSSecret(r.Client, r.controllerName, r.logger),
-			builder.WithPredicates(predicate.NewPredicateFuncs(predicates.SecretUsedInGatewayFn(r.Client, r.controllerName, r.logger)))).
+			watchhandlers.EnqueueRequestForTLSSecret(r.Client, r.controllerName, r.logger)).
 		// Watch related namespace in allowed namespaces
 		Watches(&corev1.Namespace{},
 			watchhandlers.EnqueueRequestForAllowedNamespace(r.Client, r.logger)).
 		// Watch for changes to Reference Grants
 		Watches(&gatewayv1.ReferenceGrant{}, watchhandlers.EnqueueRequestForReferenceGrant(r.Client, r.logger)).
 		// Watch for changes to BackendTLSPolicy
-		Watches(&gatewayv1.BackendTLSPolicy{}, watchhandlers.EnqueueRequestForBackendTLSPolicy(r.Client, r.logger)).
-		Watches(&corev1.ConfigMap{}, watchhandlers.EnqueueRequestForBackendTLSPolicyConfigMap(r.Client, r.logger)).
+		Watches(&gatewayv1.BackendTLSPolicy{}, watchhandlers.EnqueueRequestForBackendTLSPolicy(r.Client, r.logger, r.controllerName)).
+		Watches(&corev1.ConfigMap{}, watchhandlers.EnqueueRequestForBackendTLSPolicyConfigMap(r.Client, r.logger, r.controllerName)).
 		// Watch for changes to node in order to populate gateway ip addresses if svc of type NodePort
-		Watches(&corev1.Node{}, watchhandlers.EnqueueRequestForNodes(r.Client, r.logger, owningGatewayLabel)).
+		Watches(&corev1.Node{}, watchhandlers.EnqueueRequestForNodes(r.Client, r.logger, owningGatewayLabel, r.controllerName)).
 		// Watch created and owned resources
 		Owns(&ciliumv2.CiliumEnvoyConfig{}).
 		Owns(&corev1.Service{}).
@@ -224,12 +226,12 @@ func (r *gatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	if listenerSetEnabled {
 		// Watch ListenerSet linked to Gateway
-		gatewayBuilder = gatewayBuilder.Watches(&gatewayv1.ListenerSet{}, watchhandlers.EnqueueRequestForListenerSetOwner(r.Client, r.logger, defaultControllerName))
+		gatewayBuilder = gatewayBuilder.Watches(&gatewayv1.ListenerSet{}, watchhandlers.EnqueueRequestForListenerSetOwner(r.Client, r.logger, r.controllerName))
 	}
 
 	if serviceImportEnabled {
 		// Watch for changes to Backend Service Imports
-		gatewayBuilder = gatewayBuilder.Watches(&mcsapiv1beta1.ServiceImport{}, watchhandlers.EnqueueRequestForBackendServiceImport(r.Client, *r.logger))
+		gatewayBuilder = gatewayBuilder.Watches(&mcsapiv1beta1.ServiceImport{}, watchhandlers.EnqueueRequestForBackendServiceImport(r.Client, *r.logger, r.controllerName))
 	}
 
 	return gatewayBuilder.Complete(r)

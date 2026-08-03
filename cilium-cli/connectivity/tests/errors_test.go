@@ -164,6 +164,90 @@ func TestGoBGPv4FailedToSendMatcher(t *testing.T) {
 	}
 }
 
+func TestLeaderElectionLeaseLockErrorMatcher(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		log       string
+		wantMatch bool
+	}{
+		{
+			name:      "ignored: client-go leader election lease retrieval failure",
+			log:       `time=2026-07-10T15:06:16Z level=error source=/go/src/github.com/cilium/cilium/vendor/k8s.io/client-go/tools/leaderelection/leaderelection.go:461 msg="Error retrieving lease lock" subsys=klog error="Client.Timeout exceeded while awaiting headers"`,
+			wantMatch: true,
+		},
+		{
+			name:      "reported: same message from another package",
+			log:       `time=2026-07-10T15:06:16Z level=error source=/go/src/github.com/cilium/cilium/operator/pkg/leader/leader.go:42 msg="Error retrieving lease lock" subsys=klog`,
+			wantMatch: false,
+		},
+		{
+			name:      "reported: another client-go leader election error",
+			log:       `time=2026-07-10T15:06:16Z level=error source=/go/src/github.com/cilium/cilium/vendor/k8s.io/client-go/tools/leaderelection/leaderelection.go:461 msg="Failed to renew lease" subsys=klog`,
+			wantMatch: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantMatch, vendoredLeaderElectionLeaseLockError.IsMatch(tt.log))
+		})
+	}
+}
+
+func TestInstanceOutOfInterfacesThreshold(t *testing.T) {
+	line := func(node string) string {
+		return `time=2026-07-15T20:46:30Z level=warning msg="Instance is out of interfaces" subsys=ipam-allocator-aws name=` + node + ` instanceID=i-0abc`
+	}
+
+	for _, tt := range []struct {
+		name       string
+		lines      []string
+		wantFailed bool
+	}{
+		{
+			name:       "one node at capacity is tolerated",
+			lines:      []string{line("ip-1.compute.internal")},
+			wantFailed: false,
+		},
+		{
+			name: "one node logging repeatedly is still tolerated",
+			lines: []string{
+				line("ip-1.compute.internal"),
+				line("ip-1.compute.internal"),
+				line("ip-1.compute.internal"),
+			},
+			wantFailed: false,
+		},
+		{
+			name: "two distinct nodes at capacity is a failure",
+			lines: []string{
+				line("ip-1.compute.internal"),
+				line("ip-2.compute.internal"),
+			},
+			wantFailed: true,
+		},
+		{
+			name: "many distinct nodes at capacity is a failure",
+			lines: []string{
+				line("ip-1.compute.internal"),
+				line("ip-2.compute.internal"),
+				line("ip-3.compute.internal"),
+			},
+			wantFailed: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var zt time.Time
+			s := NoErrorsInLogs(semver.MustParse("1.19.0"), defaults.LogCheckLevels, nil, "one.one.one.one", "k8s.io", zt).(*noErrorsInLogs)
+			logs := strings.Join(tt.lines, "\n") + "\n"
+			fails, _ := s.findUniqueFailures([]byte(logs))
+			if tt.wantFailed {
+				assert.Contains(t, fails, "Instance is out of interfaces")
+			} else {
+				assert.NotContains(t, fails, "Instance is out of interfaces")
+			}
+		})
+	}
+}
+
 func TestExtractPathFromLog(t *testing.T) {
 	_, thisPath, _, _ := runtime.Caller(0)
 	repoDir, _ := filepath.Abs(filepath.Join(thisPath, "..", "..", "..", ".."))

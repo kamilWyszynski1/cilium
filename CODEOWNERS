@@ -74,7 +74,7 @@
 #   metrics being added or extended.
 # - @cilium/release-managers:
 #   Review files related to releases like AUTHORS and VERSION.
-# - @cilium/security:
+# - @cilium/security-cilium:
 #   Provide feedback on changes that could have security implications for Cilium,
 #   and maintain security-related documentation.
 # - @cilium/vendor:
@@ -88,6 +88,8 @@
 # The following code owners are responsible for a range of general feedback for
 # contributions to specific repositories:
 #
+# - @cilium/cilium-io
+#   Reviewing code related to the website
 # - @cilium/sig-hubble:
 #   Review all Cilium and Hubble code related to observing system events,
 #   exporting those via gRPC protocols outside the node and outside the
@@ -109,6 +111,7 @@
 # the CODEOWNERS file in the corresponding repository.
 #
 # - @cilium/cilium-cli-maintainers
+# - @cilium/cilium-io-committers
 # - @cilium/cilium-maintainers
 # - @cilium/cilium-packer-ci-build-maintainers
 # - @cilium/ebpf-lib-maintainers
@@ -224,6 +227,15 @@
 #   Maintain the ztunnel mTLS-proxy integration in Cilium to ensure the ztunnel
 #   agent receives the necessary information to successfully proxy pod-to-pod
 #   traffic through mTLS tunnels.
+# - @cilium/network-driver:
+#   Maintain the Cilium Network Driver feature, that allows to request and share
+#   networking resources, like SR-IOV devices, among workloads. Responsible for all
+#   interactions between the driver and the Kubelet via the Dynamic Resource
+#   Allocation (DRA) API as well as between the driver and the Container Runtime
+#   via the Node Resource Interface (NRI) API. Ensure the consistency of the
+#   dedicated IPAM modes with the Network Driver resources management.
+#   This code owner is not related to the low level interactions with the Linux
+#   network drivers.
 #
 # END_CODEOWNERS_DOCS
 #
@@ -474,7 +486,7 @@ Makefile* @cilium/build
 /Documentation/overview/intro.rst @cilium/docs-structure
 /Documentation/requirements.txt @cilium/docs-structure
 /Documentation/security/http.rst @cilium/sig-policy @cilium/docs-structure
-/Documentation/security/images/cilium_threat_model* @cilium/security @cilium/docs-structure
+/Documentation/security/images/cilium_threat_model* @cilium/security-cilium @cilium/docs-structure
 /Documentation/security/network/encryption-ipsec.rst @cilium/ipsec @cilium/docs-structure
 /Documentation/security/network/encryption-wireguard.rst @cilium/wireguard @cilium/docs-structure
 /Documentation/security/network/encryption-ztunnel.rst @cilium/ztunnel @cilium/docs-structure
@@ -482,13 +494,14 @@ Makefile* @cilium/build
 /Documentation/security/policy-creation.rst @cilium/sig-policy @cilium/docs-structure
 /Documentation/security/policy/ @cilium/sig-policy @cilium/docs-structure
 /Documentation/security/standalone-dns-proxy.rst @cilium/fqdn @cilium/docs-structure
-/Documentation/security/threat-model.rst @cilium/security @cilium/docs-structure
+/Documentation/security/threat-model.rst @cilium/security-cilium @cilium/docs-structure
 /Documentation/spelling_wordlist.txt @cilium/docs-structure
 /Documentation/update-cmdref.sh @cilium/docs-structure
 /Documentation/update-feature-metrics.sh @cilium/docs-structure
 /Documentation/update-spelling_wordlist.sh @cilium/docs-structure
 /Documentation/yaml.config @cilium/docs-structure
 /examples/ @cilium/docs-structure
+/examples/datapath-plugin/ @cilium/sig-datapath @cilium/loader
 /examples/hubble/ @cilium/sig-hubble
 /examples/kubernetes-egress-gateway/ @cilium/egress-gateway
 /examples/kubernetes/ @cilium/sig-k8s
@@ -661,6 +674,7 @@ Makefile* @cilium/build
 /pkg/multicast @cilium/sig-datapath
 /pkg/murmur3/ @cilium/sig-datapath
 /pkg/netns/ @cilium/sig-datapath @cilium/sig-k8s
+/pkg/networkdriver @cilium/network-driver
 /pkg/node @cilium/sig-agent
 /pkg/node/neighbordiscovery @cilium/sig-agent @cilium/sig-datapath
 /pkg/nodediscovery/ @cilium/sig-agent
@@ -683,6 +697,7 @@ Makefile* @cilium/build
 /pkg/revert/ @cilium/sig-agent
 /pkg/safeio @cilium/sig-agent
 /pkg/safetime/ @cilium/sig-agent
+/pkg/secretsync @cilium/envoy @cilium/sig-servicemesh
 /pkg/shortener @cilium/sig-foundations @cilium/sig-k8s
 /pkg/signal @cilium/sig-datapath
 /pkg/slices @cilium/sig-foundations
@@ -709,7 +724,7 @@ Makefile* @cilium/build
 /plugins/cilium-cni/ @cilium/sig-k8s
 /README.rst @cilium/docs-structure @cilium/release-managers
 /SECURITY.md @cilium/contributing
-/SECURITY-INSIGHTS.yml @cilium/security
+/SECURITY-INSIGHTS.yml @cilium/security-cilium
 /stable.txt @cilium/release-managers
 /standalone-dns-proxy/ @cilium/fqdn
 /standalone-dns-proxy/Makefile @cilium/build

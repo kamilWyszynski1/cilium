@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	mcsapiv1beta1 "sigs.k8s.io/mcs-api/pkg/apis/v1beta1"
 
 	"github.com/cilium/cilium/operator/pkg/model"
 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
@@ -75,6 +76,45 @@ func TestHTTPGatewayAPI(t *testing.T) {
 			assert.Equal(t, toYaml(t, expected), toYaml(t, m.HTTP), "Listeners did not match")
 		})
 	}
+}
+
+func TestExtractRoutesSetsHTTPRouteRuleSource(t *testing.T) {
+	logger := hivetest.Logger(t, hivetest.LogLevel(slog.LevelDebug))
+	pathType := gatewayv1.PathMatchExact
+	path := "/same-path"
+	hr := gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "route",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					Matches: []gatewayv1.HTTPRouteMatch{
+						{Path: &gatewayv1.HTTPPathMatch{Type: &pathType, Value: &path}},
+					},
+				},
+				{
+					Matches: []gatewayv1.HTTPRouteMatch{
+						{Path: &gatewayv1.HTTPPathMatch{Type: &pathType, Value: &path}},
+					},
+				},
+			},
+		},
+	}
+
+	routes := extractRoutes(logger, 80, nil, hr, nil, nil, nil, nil)
+
+	require.Len(t, routes, 2)
+	require.NotNil(t, routes[0].SourceRule)
+	require.NotNil(t, routes[1].SourceRule)
+	assert.Equal(t, "route", routes[0].SourceRule.Source.Name)
+	assert.Equal(t, "default", routes[0].SourceRule.Source.Namespace)
+	assert.Equal(t, "HTTPRoute", routes[0].SourceRule.Source.Kind)
+	assert.Equal(t, 0, routes[0].SourceRule.RuleIndex)
+	assert.Equal(t, 0, routes[0].SourceRule.MatchIndex)
+	assert.Equal(t, 1, routes[1].SourceRule.RuleIndex)
+	assert.Equal(t, 0, routes[1].SourceRule.MatchIndex)
 }
 
 func TestHTTPGatewayAPIFiltersSelectorNamespacesPerListener(t *testing.T) {
@@ -468,6 +508,112 @@ func TestTLSGatewayAPIFiltersRoutesByListenerAllowedNamespaces(t *testing.T) {
 	assert.Equal(t, "podinfo", m.TLSPassthrough[1].Routes[0].Backends[0].Name)
 }
 
+func TestParentRefsMatchListener(t *testing.T) {
+	listener := gatewayv1.Listener{
+		Name: "http-listener",
+		Port: 80,
+	}
+
+	tests := []struct {
+		name       string
+		parentRefs []gatewayv1.ParentReference
+		want       bool
+	}{
+		{
+			name: "both fields nil matches listener",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: nil, Port: nil},
+			},
+			want: true,
+		},
+		{
+			name: "sectionName matches and port is nil",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: ptr.To[gatewayv1.SectionName]("http-listener"), Port: nil},
+			},
+			want: true,
+		},
+		{
+			name: "sectionName mismatches and port is nil",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: ptr.To[gatewayv1.SectionName]("wrong-listener"), Port: nil},
+			},
+			want: false,
+		},
+		{
+			name: "sectionName is nil and port matches",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: nil, Port: ptr.To[gatewayv1.PortNumber](80)},
+			},
+			want: true,
+		},
+		{
+			name: "sectionName is nil and port mismatches",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: nil, Port: ptr.To[gatewayv1.PortNumber](443)},
+			},
+			want: false,
+		},
+		{
+			name: "sectionName and port match",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: ptr.To[gatewayv1.SectionName]("http-listener"), Port: ptr.To[gatewayv1.PortNumber](80)},
+			},
+			want: true,
+		},
+		{
+			name: "sectionName matches and port mismatches",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: ptr.To[gatewayv1.SectionName]("http-listener"), Port: ptr.To[gatewayv1.PortNumber](443)},
+			},
+			want: false,
+		},
+		{
+			name: "sectionName mismatches and port matches",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: ptr.To[gatewayv1.SectionName]("wrong-listener"), Port: ptr.To[gatewayv1.PortNumber](80)},
+			},
+			want: false,
+		},
+		{
+			name: "multiple parentRefs and second one matches",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: ptr.To[gatewayv1.SectionName]("wrong-listener"), Port: ptr.To[gatewayv1.PortNumber](443)},
+				{SectionName: ptr.To[gatewayv1.SectionName]("http-listener"), Port: ptr.To[gatewayv1.PortNumber](80)},
+			},
+			want: true,
+		},
+		{
+			name: "multiple parentRefs and later port-only ref matches",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: ptr.To[gatewayv1.SectionName]("http-listener"), Port: ptr.To[gatewayv1.PortNumber](443)},
+				{SectionName: nil, Port: ptr.To[gatewayv1.PortNumber](80)},
+			},
+			want: true,
+		},
+		{
+			name: "multiple parentRefs and none match",
+			parentRefs: []gatewayv1.ParentReference{
+				{SectionName: ptr.To[gatewayv1.SectionName]("wrong-listener"), Port: ptr.To[gatewayv1.PortNumber](80)},
+				{SectionName: ptr.To[gatewayv1.SectionName]("http-listener"), Port: ptr.To[gatewayv1.PortNumber](443)},
+			},
+			want: false,
+		},
+		{
+			name:       "empty parentRefs list",
+			parentRefs: []gatewayv1.ParentReference{},
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parentRefsMatchListener(tt.parentRefs, listener)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestTLSGatewayAPI(t *testing.T) {
 	tests := map[string]struct{}{
 		"basic tls http": {},
@@ -475,6 +621,7 @@ func TestTLSGatewayAPI(t *testing.T) {
 		"Conformance/TLSRouteHostnameIntersection": {},
 		"mixed protocol listeners TLSRoute":        {},
 		"tls weighted backends":                    {},
+		"tls route parent ref filter":              {},
 	}
 
 	for name := range tests {
@@ -1005,6 +1152,64 @@ func TestHTTPRequestMirrorCrossNamespaceWithReferenceGrantIsKept(t *testing.T) {
 	assert.Equal(t, "other-ns", routes[0].RequestMirrors[0].Backend.Namespace)
 }
 
+func TestHTTPRequestMirrorServiceImportIsResolved(t *testing.T) {
+	logger := hivetest.Logger(t, hivetest.LogLevel(slog.LevelDebug))
+
+	routes := extractRoutes(logger, 80, nil, gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "serviceimport-http-mirror",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: gatewayv1.ObjectName("backend"),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+					Filters: []gatewayv1.HTTPRouteFilter{
+						{
+							Type: gatewayv1.HTTPRouteFilterRequestMirror,
+							RequestMirror: &gatewayv1.HTTPRequestMirrorFilter{
+								BackendRef: gatewayv1.BackendObjectReference{
+									Group: ptr.To[gatewayv1.Group](mcsapiv1beta1.GroupName),
+									Kind:  ptr.To[gatewayv1.Kind]("ServiceImport"),
+									Name:  gatewayv1.ObjectName("mirror-import"),
+									Port:  ptr.To(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}, []corev1.Service{
+		testService("default", "backend", 8080),
+		testService("default", "mirror-service", 8080),
+	}, []mcsapiv1beta1.ServiceImport{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mirror-import",
+				Namespace: "default",
+				Annotations: map[string]string{
+					"multicluster.kubernetes.io/derived-service": "mirror-service",
+				},
+			},
+		},
+	}, nil, nil)
+
+	require.Len(t, routes, 1)
+	require.Len(t, routes[0].RequestMirrors, 1)
+	assert.Equal(t, "mirror-service", routes[0].RequestMirrors[0].Backend.Name)
+	assert.Equal(t, "default", routes[0].RequestMirrors[0].Backend.Namespace)
+}
+
 func TestGRPCRequestMirrorNilFilterDoesNotPanic(t *testing.T) {
 	routes := extractGRPCRoutes(nil, gatewayv1.GRPCRoute{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1163,6 +1368,62 @@ func TestGRPCRequestMirrorCrossNamespaceWithReferenceGrantIsKept(t *testing.T) {
 	assert.Equal(t, "other-ns", routes[0].RequestMirrors[0].Backend.Namespace)
 }
 
+func TestGRPCRequestMirrorServiceImportIsResolved(t *testing.T) {
+	routes := extractGRPCRoutes(nil, gatewayv1.GRPCRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "serviceimport-grpc-mirror",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GRPCRouteSpec{
+			Rules: []gatewayv1.GRPCRouteRule{
+				{
+					BackendRefs: []gatewayv1.GRPCBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: gatewayv1.ObjectName("backend"),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+					Filters: []gatewayv1.GRPCRouteFilter{
+						{
+							Type: gatewayv1.GRPCRouteFilterRequestMirror,
+							RequestMirror: &gatewayv1.HTTPRequestMirrorFilter{
+								BackendRef: gatewayv1.BackendObjectReference{
+									Group: ptr.To[gatewayv1.Group](mcsapiv1beta1.GroupName),
+									Kind:  ptr.To[gatewayv1.Kind]("ServiceImport"),
+									Name:  gatewayv1.ObjectName("mirror-import"),
+									Port:  ptr.To(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}, []corev1.Service{
+		testService("default", "backend", 8080),
+		testService("default", "mirror-service", 8080),
+	}, []mcsapiv1beta1.ServiceImport{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mirror-import",
+				Namespace: "default",
+				Annotations: map[string]string{
+					"multicluster.kubernetes.io/derived-service": "mirror-service",
+				},
+			},
+		},
+	}, nil)
+
+	require.Len(t, routes, 1)
+	require.Len(t, routes[0].RequestMirrors, 1)
+	assert.Equal(t, "mirror-service", routes[0].RequestMirrors[0].Backend.Name)
+	assert.Equal(t, "default", routes[0].RequestMirrors[0].Backend.Namespace)
+}
+
 func TestGatewayAPI_GatewayClassConfig(t *testing.T) {
 	logger := hivetest.Logger(t, hivetest.LogLevel(slog.LevelDebug))
 
@@ -1209,6 +1470,35 @@ func TestGatewayAPI_GatewayClassConfig(t *testing.T) {
 				},
 			},
 		}, m.Telemetry)
+	})
+	t.Run("sets server header transformation from GatewayClassConfig envoy config", func(t *testing.T) {
+		m := GatewayAPI(logger, Input{
+			Gateway: gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "cilium",
+				},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{
+							Name:     "http",
+							Port:     80,
+							Protocol: gatewayv1.HTTPProtocolType,
+						},
+					},
+				},
+			},
+			GatewayClassConfig: &v2alpha1.CiliumGatewayClassConfig{
+				Spec: v2alpha1.CiliumGatewayClassConfigSpec{
+					Envoy: &v2alpha1.EnvoyConfig{
+						ServerHeaderTransformation: ptr.To(v2alpha1.ServerHeaderTransformationPassThrough),
+					},
+				},
+			},
+		})
+
+		require.Len(t, m.HTTP, 1)
+		assert.Equal(t, model.ServerHeaderTransformationPassThrough, m.HTTP[0].ServerHeaderTransformation)
 	})
 }
 

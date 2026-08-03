@@ -86,6 +86,7 @@ type infraIPAllocator struct {
 type ipamAllocator interface {
 	AllocateIPWithoutSyncUpstream(ip netip.Addr, owner string, pool ipam.Pool) (*ipam.AllocationResult, error)
 	AllocateNextFamilyWithoutSyncUpstream(family ipam.Family, owner string, pool ipam.Pool) (result *ipam.AllocationResult, err error)
+	AllocateNextFamily(family ipam.Family, owner string, pool ipam.Pool) (result *ipam.AllocationResult, err error)
 	ExcludeIP(ip netip.Addr, owner string, pool ipam.Pool)
 	ReleaseIP(ip netip.Addr, pool ipam.Pool) error
 }
@@ -119,7 +120,7 @@ func (r *infraIPAllocator) allocateRouterIPv4(ctx context.Context, family node.A
 		if routerIP == nil {
 			return nil, fmt.Errorf("invalid local-router-ip: %s", r.daemonConfig.LocalRouterIPv4)
 		}
-		if r.nodeAddressing.IPv4().AllocationCIDR().Contains(routerIP) {
+		if r.nodeAddressing.IPv4().AllocationCIDR().Contains(iputil.AddrFromIP(routerIP)) {
 			r.logger.Warn("Specified router IP is within IPv4 podCIDR.")
 		}
 		return routerIP, nil
@@ -134,7 +135,7 @@ func (r *infraIPAllocator) allocateRouterIPv6(ctx context.Context, family node.A
 		if routerIP == nil {
 			return nil, fmt.Errorf("invalid local-router-ip: %s", r.daemonConfig.LocalRouterIPv6)
 		}
-		if r.nodeAddressing.IPv6().AllocationCIDR().Contains(routerIP) {
+		if r.nodeAddressing.IPv6().AllocationCIDR().Contains(iputil.AddrFromIP(routerIP)) {
 			r.logger.Warn("Specified router IP is within IPv6 podCIDR.")
 		}
 		return routerIP, nil
@@ -220,6 +221,53 @@ func (r *infraIPAllocator) reallocateOldRouterIPs(fromK8s, fromFS net.IP) (resul
 	return result
 }
 
+func (r *infraIPAllocator) allocateNextFromPool(ctx context.Context, family ipam.Family, owner string) (*ipam.AllocationResult, error) {
+	result, err := r.ipAllocator.AllocateNextFamilyWithoutSyncUpstream(family, owner, ipam.PoolDefault())
+	if err == nil {
+		return result, nil
+	}
+
+	var poolErr *ipam.ErrPoolNotReadyYet
+	if !errors.As(err, &poolErr) {
+		return nil, err
+	}
+
+	// The pool is not yet provisioned by the operator. Fall back to
+	// AllocateNextFamily which triggers an upstream K8s sync to request
+	// pool provisioning, then retry until the pool becomes available.
+	bo := wait.Backoff{
+		Duration: 500 * time.Millisecond,
+		Factor:   1.5,
+		Jitter:   0.1,
+		Steps:    20,
+	}
+
+	var lastErr error
+	err = wait.ExponentialBackoffWithContext(ctx, bo, func(ctx context.Context) (bool, error) {
+		var allocErr error
+		result, allocErr = r.ipAllocator.AllocateNextFamily(family, owner, ipam.PoolDefault())
+		if allocErr == nil {
+			return true, nil
+		}
+
+		var poolErr *ipam.ErrPoolNotReadyYet
+		if errors.As(allocErr, &poolErr) {
+			lastErr = allocErr
+			return false, nil
+		}
+
+		return true, allocErr
+	})
+
+	if err != nil {
+		if lastErr != nil {
+			return nil, fmt.Errorf("timed out allocating IP: %w", lastErr)
+		}
+		return nil, fmt.Errorf("unable to allocate next IP: %w", err)
+	}
+	return result, nil
+}
+
 func (r *infraIPAllocator) waitForENI(ctx context.Context, macAddr string) error {
 	bo := wait.Backoff{
 		Duration: 250 * time.Millisecond,
@@ -262,7 +310,7 @@ func (r *infraIPAllocator) reallocateRouterIPs(ctx context.Context, family node.
 	if result == nil {
 		primaryAddr, _ := netip.AddrFromSlice(family.PrimaryExternal())
 		family := ipam.DeriveFamily(primaryAddr.Unmap())
-		result, err = r.ipAllocator.AllocateNextFamilyWithoutSyncUpstream(family, "router", ipam.PoolDefault())
+		result, err = r.allocateNextFromPool(ctx, family, "router")
 		if err != nil {
 			return nil, fmt.Errorf("unable to allocate router IP for family %s: %w", family, err)
 		}
@@ -292,19 +340,18 @@ func (r *infraIPAllocator) reallocateRouterIPs(ctx context.Context, family node.
 			return nil, fmt.Errorf("failed to create router info: %w", err)
 		}
 
-		// wait for ENI to be up and running before configuring routes and rules.
-		// This avoids spurious errors where netlink is not able to find
-		// the ifindex by its MAC because the ENI is not showing up yet.
-		if r.daemonConfig.IPAM == ipamOption.IPAMENI {
+		// Wait for the ENI to show up before configuring routes and rules, to
+		// avoid netlink failing to find the ifindex by its MAC.
+		if r.daemonConfig.IPAM == ipamOption.IPAMENI || r.daemonConfig.IPAM == ipamOption.IPAMAlibabaCloud {
 			if err := r.waitForENI(ctx, result.PrimaryMAC); err != nil {
-				r.logger.Warn("unable to find ENI netlink interface, this will likely lead to an error in configuring the router routes and rules",
+				r.logger.Error("Unable to find ENI netlink interface, this will likely lead to an error in configuring the router routes and rules",
 					logfields.MACAddr, result.PrimaryMAC,
 				)
 			}
 		}
 
 		if err = routingInfo.Configure(
-			net.IP(result.IP.AsSlice()).To16(),
+			result.IP,
 			r.mtuManager.GetDeviceMTU(),
 			true,
 		); err != nil {
@@ -346,32 +393,32 @@ func (r *infraIPAllocator) reallocateRouterIPs(ctx context.Context, family node.
 	return net.IP(result.IP.AsSlice()).To16(), nil
 }
 
-func (r *infraIPAllocator) allocateHealthIPs(oldV4HealthIP net.IP, oldV6HealthIP net.IP) error {
+func (r *infraIPAllocator) allocateHealthIPs(ctx context.Context, oldV4HealthIP netip.Addr, oldV6HealthIP netip.Addr) error {
 	if !r.daemonConfig.EnableHealthChecking || !r.daemonConfig.EnableEndpointHealthChecking {
 		return nil
 	}
-	var healthIPv4, healthIPv6 net.IP
+	var healthIPv4, healthIPv6 netip.Addr
 	if r.daemonConfig.EnableIPv4 {
 		var result *ipam.AllocationResult
 		var err error
 		healthIPv4 = oldV4HealthIP
-		if healthIPv4 != nil {
-			result, err = r.ipAllocator.AllocateIPWithoutSyncUpstream(iputil.AddrFromIP(healthIPv4), "health", ipam.PoolDefault())
+		if healthIPv4.IsValid() {
+			result, err = r.ipAllocator.AllocateIPWithoutSyncUpstream(healthIPv4, "health", ipam.PoolDefault())
 			if err != nil {
 				r.logger.Warn(
 					"unable to re-allocate health IPv4, a new health IPv4 will be allocated",
 					logfields.Error, err,
 					logfields.IPv4, healthIPv4,
 				)
-				healthIPv4 = nil
+				healthIPv4 = netip.Addr{}
 			}
 		}
-		if healthIPv4 == nil {
-			result, err = r.ipAllocator.AllocateNextFamilyWithoutSyncUpstream(ipam.IPv4, "health", ipam.PoolDefault())
+		if !healthIPv4.IsValid() {
+			result, err = r.allocateNextFromPool(ctx, ipam.IPv4, "health")
 			if err != nil {
 				return fmt.Errorf("unable to allocate health IPv4: %w, see https://cilium.link/ipam-range-full", err)
 			}
-			r.localNodeStore.Update(func(n *node.LocalNode) { n.IPv4HealthIP = net.IP(result.IP.AsSlice()).To16() })
+			r.localNodeStore.Update(func(n *node.LocalNode) { n.IPv4HealthIP = iputil.AddrFrom(result.IP) })
 		}
 
 		// Coalescing multiple CIDRs. GH #18868
@@ -398,34 +445,34 @@ func (r *infraIPAllocator) allocateHealthIPs(oldV4HealthIP net.IP, oldV6HealthIP
 		var result *ipam.AllocationResult
 		var err error
 		healthIPv6 = oldV6HealthIP
-		if healthIPv6 != nil {
-			result, err = r.ipAllocator.AllocateIPWithoutSyncUpstream(iputil.AddrFromIP(healthIPv6), "health", ipam.PoolDefault())
+		if healthIPv6.IsValid() {
+			result, err = r.ipAllocator.AllocateIPWithoutSyncUpstream(healthIPv6, "health", ipam.PoolDefault())
 			if err != nil {
 				r.logger.Warn(
 					"unable to re-allocate health IPv6, a new health IPv6 will be allocated",
 					logfields.Error, err,
 					logfields.IPv6, healthIPv6,
 				)
-				healthIPv6 = nil
+				healthIPv6 = netip.Addr{}
 			}
 		}
-		if healthIPv6 == nil {
-			result, err = r.ipAllocator.AllocateNextFamilyWithoutSyncUpstream(ipam.IPv6, "health", ipam.PoolDefault())
+		if !healthIPv6.IsValid() {
+			result, err = r.allocateNextFromPool(ctx, ipam.IPv6, "health")
 			if err != nil {
-				if healthIPv4 != nil {
-					r.ipAllocator.ReleaseIP(iputil.AddrFromIP(healthIPv4), ipam.PoolDefault())
-					r.localNodeStore.Update(func(n *node.LocalNode) { n.IPv4HealthIP = nil })
+				if healthIPv4.IsValid() {
+					r.ipAllocator.ReleaseIP(healthIPv4, ipam.PoolDefault())
+					r.localNodeStore.Update(func(n *node.LocalNode) { n.IPv4HealthIP = iputil.Addr{} })
 				}
 				return fmt.Errorf("unable to allocate health IPv6: %w, see https://cilium.link/ipam-range-full", err)
 			}
-			r.localNodeStore.Update(func(n *node.LocalNode) { n.IPv6HealthIP = net.IP(result.IP.AsSlice()).To16() })
+			r.localNodeStore.Update(func(n *node.LocalNode) { n.IPv6HealthIP = iputil.AddrFrom(result.IP) })
 		}
 		r.logger.Debug("Allocated IPv6 health endpoint address", logfields.IPAddr, result.IP)
 	}
 	return nil
 }
 
-func (r *infraIPAllocator) allocateIngressIPs(oldV4IngressIP net.IP, oldV6IngressIP net.IP) error {
+func (r *infraIPAllocator) allocateIngressIPs(ctx context.Context, oldV4IngressIP net.IP, oldV6IngressIP net.IP) error {
 	if !r.daemonConfig.EnableEnvoyConfig {
 		return nil
 	}
@@ -450,7 +497,7 @@ func (r *infraIPAllocator) allocateIngressIPs(oldV4IngressIP net.IP, oldV6Ingres
 		// Allocate a fresh IP if not restored, or the reallocation of the restored
 		// IP failed
 		if result == nil {
-			result, err = r.ipAllocator.AllocateNextFamilyWithoutSyncUpstream(ipam.IPv4, "ingress", ipam.PoolDefault())
+			result, err = r.allocateNextFromPool(ctx, ipam.IPv4, "ingress")
 			if err != nil {
 				return fmt.Errorf("unable to allocate ingress IPs: %w, see https://cilium.link/ipam-range-full", err)
 			}
@@ -475,8 +522,17 @@ func (r *infraIPAllocator) allocateIngressIPs(oldV4IngressIP net.IP, oldV6Ingres
 			if ingressRouting, err := r.parseRoutingInfo(result); err != nil {
 				r.logger.Warn("Unable to allocate ingress information for ENI", logfields.Error, err)
 			} else {
+				// The ingress IP may sit on a different ENI than the router IP, so
+				// wait for its ENI to show up before configuring routes and rules,
+				// to avoid netlink failing to find the ifindex by its MAC.
+				if err := r.waitForENI(ctx, result.PrimaryMAC); err != nil {
+					r.logger.Error("Unable to find ENI netlink interface, this will likely lead to an error in configuring the ingress routes and rules",
+						logfields.MACAddr, result.PrimaryMAC,
+					)
+				}
+
 				if err := ingressRouting.Configure(
-					net.IP(result.IP.AsSlice()).To16(),
+					result.IP,
 					r.mtuManager.GetDeviceMTU(),
 					false,
 				); err != nil {
@@ -507,7 +563,7 @@ func (r *infraIPAllocator) allocateIngressIPs(oldV4IngressIP net.IP, oldV6Ingres
 		// Allocate a fresh IP if not restored, or the reallocation of the restored
 		// IP failed
 		if result == nil {
-			result, err = r.ipAllocator.AllocateNextFamilyWithoutSyncUpstream(ipam.IPv6, "ingress", ipam.PoolDefault())
+			result, err = r.allocateNextFromPool(ctx, ipam.IPv6, "ingress")
 			if err != nil {
 				if ingressIPv4 != nil {
 					r.ipAllocator.ReleaseIP(iputil.AddrFromIP(ingressIPv4), ipam.PoolDefault())
@@ -553,11 +609,11 @@ func (r *infraIPAllocator) AllocateIPs(ctx context.Context) error {
 		return fmt.Errorf("failed to allocate service loopback IPs: %w", err)
 	}
 
-	if err := r.allocateIngressIPs(localNode.IPv4IngressIP, localNode.IPv6IngressIP); err != nil {
+	if err := r.allocateIngressIPs(ctx, localNode.IPv4IngressIP, localNode.IPv6IngressIP); err != nil {
 		return fmt.Errorf("failed to allocate ingress IPs: %w", err)
 	}
 
-	if err := r.allocateHealthIPs(localNode.IPv4HealthIP, localNode.IPv6HealthIP); err != nil {
+	if err := r.allocateHealthIPs(ctx, localNode.IPv4HealthIP.Addr, localNode.IPv6HealthIP.Addr); err != nil {
 		return fmt.Errorf("failed to allocate health IPs: %w", err)
 	}
 

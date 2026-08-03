@@ -1585,6 +1585,10 @@ const (
 
 	ActualPrevInterval = "actualPrevInterval"
 
+	ExpectedDuration = "expectedDuration"
+
+	ElapsedDuration = "elapsedDuration"
+
 	NewInterval = "newInterval"
 
 	DeleteRatio = "deleteRatio"
@@ -1933,4 +1937,12 @@ const (
 	CiliumDatapathPluginAttachmentPolicy = "datapathPluginAttachmentPolicy"
 
 	CiliumDatapathPluginVersion = "datapathPluginVersion"
+
+	Attributes = "attributes"
+
+	DriverName = "driverName"
+
+	PodUID = "podUID"
+
+	ClaimUID = "claimUID"
 )

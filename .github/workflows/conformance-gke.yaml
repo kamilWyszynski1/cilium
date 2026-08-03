@@ -106,7 +106,7 @@ env:
   clusterName: ${{ github.event.repository.name }}-${{ github.run_id }}-${{ inputs.UID }}-${{ github.run_attempt }}
   USE_GKE_GCLOUD_AUTH_PLUGIN: True
   # renovate: datasource=docker depName=google/cloud-sdk
-  gcloud_version: 574.0.0
+  gcloud_version: 577.0.0
 
 jobs:
   echo-inputs:
@@ -135,7 +135,7 @@ jobs:
       empty: ${{ steps.set-matrix.outputs.empty }}
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -271,7 +271,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -284,6 +284,7 @@ jobs:
           login-host: ${{ vars.DOCKER_READ_HOST }}
           login-username: ${{ vars.DOCKER_READ_USERNAME }}
           login-password: ${{ secrets.DOCKER_READ_PASSWORD }}
+          auth-required: ${{ vars.DOCKER_AUTH_REQUIRED }}
 
   installation-and-connectivity:
     name: Installation and Connectivity Test
@@ -309,7 +310,7 @@ jobs:
           comment_on_pr: false
 
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -426,6 +427,7 @@ jobs:
           kubeconfig: "~/.kube/config"
 
       - name: Create imagePullSecret
+        if: ${{ vars.DOCKER_AUTH_REQUIRED == 'true' }}
         run: |
           kubectl create secret docker-registry cilium-registry \
             --namespace kube-system \
@@ -434,7 +436,7 @@ jobs:
             --docker-password="${{ secrets.DOCKER_READ_PASSWORD }}"
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@e391e739db83a8b888ecf18786af6853c51a0c58 # v0.19.5
+        uses: cilium/cilium-cli@7ca7fc53c20275f5c10ef5f3557076691fd1d720 # v0.19.7
         with:
           skip-build: ${{ env.CILIUM_CLI_SKIP_BUILD }}
           image-repo: ${{ env.CILIUM_CLI_IMAGE_REPO }}
@@ -454,10 +456,12 @@ jobs:
       # Warning: since this is a privileged workflow, subsequent workflow job
       # steps must take care not to execute untrusted code.
       - name: Checkout pull request branch (NOT TRUSTED)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.vars.outputs.sha }}
           persist-credentials: false
+          # Required by checkout v7+ to fetch fork PR code; see the NOT TRUSTED warning above.
+          allow-unsafe-pr-checkout: true
           path: untrusted
           sparse-checkout: |
             install/kubernetes/cilium
@@ -514,6 +518,11 @@ jobs:
           if [[ "${{ matrix.config.kpr }}" == "true" ]]; then
             CONNECTIVITY_TEST_DEFAULTS+=" --test '!pod-to-host'"
           fi
+          # GKE nodes have public IPs and receive stray internet fragments
+          # whose first fragment never reaches the node, which the datapath
+          # correctly drops as world-sourced. Tolerate only that variant here;
+          # in-cluster fragment drops keep the strict reason. See cilium#44131.
+          CONNECTIVITY_TEST_DEFAULTS+=" --expected-drop-reasons='+First logical datagram fragment not found from world'"
 
           echo connectivity_test_defaults=${CONNECTIVITY_TEST_DEFAULTS} >> $GITHUB_OUTPUT
 

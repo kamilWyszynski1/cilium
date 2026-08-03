@@ -67,9 +67,10 @@ type testData struct {
 	cachedSelectorBar1 CachedSelector
 	cachedSelectorBar2 CachedSelector
 
-	cachedSelectorWorld   CachedSelector
-	cachedSelectorWorldV4 CachedSelector
-	cachedSelectorWorldV6 CachedSelector
+	cachedSelectorWorld          CachedSelector
+	cachedSelectorWorldV4        CachedSelector
+	cachedSelectorWorldV6        CachedSelector
+	cachedSelectorAggregateWorld CachedSelector
 }
 
 func newTestData(tb testing.TB, logger *slog.Logger) *testData {
@@ -92,7 +93,7 @@ func newTestData(tb testing.TB, logger *slog.Logger) *testData {
 	td.cachedSelectorCIDR = func(cidr api.CIDR) CachedSelector {
 		css, _ := td.sc.AddSelectors(dummySelectorCacheUser, types.ToSelector(cidr))
 		return css[0]
-	}(api.CIDR("10.1.1.1"))
+	}(api.CIDR("10.1.1.1/32"))
 
 	td.cachedSelectorCIDR0 = func(cidr api.CIDR) CachedSelector {
 		css, _ := td.sc.AddSelectors(dummySelectorCacheUser, types.ToSelector(cidr))
@@ -113,10 +114,11 @@ func newTestData(tb testing.TB, logger *slog.Logger) *testData {
 	td.cachedSelectorWorld = td.getCachedSelectorForTest(api.EntitySelectorMapping[api.EntityWorld][0])
 	td.cachedSelectorWorldV4 = td.getCachedSelectorForTest(api.EntitySelectorMapping[api.EntityWorldIPv4][0])
 	td.cachedSelectorWorldV6 = td.getCachedSelectorForTest(api.EntitySelectorMapping[api.EntityWorldIPv6][0])
+	td.cachedSelectorAggregateWorld = td.getCachedSelectorForTest(api.EntitySelectorMapping[api.EntityWorld][3])
 
-	td.repo.policyCache.insert(idA)
-	td.repo.policyCache.insert(idB)
-	td.repo.policyCache.insert(idC)
+	idMgr.Add(idA)
+	idMgr.Add(idB)
+	idMgr.Add(idC)
 
 	return td
 }
@@ -151,6 +153,7 @@ func (td *testData) withIDs(initIDs ...identity.IdentityMap) *testData {
 	}
 	wg := &sync.WaitGroup{}
 	td.sc.UpdateIdentities(initial, nil, wg)
+	td.subjectSc.UpdateIdentities(initial, nil, wg)
 	wg.Wait()
 
 	for id := range initial {

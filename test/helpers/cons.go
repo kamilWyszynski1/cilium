@@ -136,6 +136,8 @@ const (
 	failedToUpdateLock                = "Failed to update lock"
 	failedToReleaseLock               = "Failed to release lock:"
 	errorCreatingInitialLeader        = "error initially creating leader election record:"
+	failedToRetrieveLock              = "Error retrieving lease lock"                                           // cf. https://github.com/cilium/cilium/issues/45426 ; client-go v1.35+ renamed "error retrieving resource lock".
+	leaderElectionReadTimeout         = "(Client.Timeout or context cancellation while reading body)"           // cf. https://github.com/cilium/cilium/issues/45426 ; sibling of failedToRetrieveLock, matched on the cause so genuine read failures still fail.
 	cantEnableJIT                     = "bpf_jit_enable: no such file or directory"                             // Because we run tests in Kind.
 	podCIDRUnavailable                = " PodCIDR not available"                                                // cf. https://github.com/cilium/cilium/issues/29680
 	unableGetNode                     = "Unable to get node resource"                                           // cf. https://github.com/cilium/cilium/issues/29710
@@ -193,7 +195,8 @@ var badLogMessages = map[string][]string{
 	// error cannot be fixed in Cilium or in the test.
 	logutils.ErrorLogs: {opCantBeFulfilled, initLeaderElection, globalDataSupport,
 		failedToListCRDs, retrieveResLock, failedToRelLockEmptyName, failedToUpdateLock,
-		failedToReleaseLock, errorCreatingInitialLeader, errorCreatingInitialLeaderGEK8s35},
+		failedToReleaseLock, errorCreatingInitialLeader, errorCreatingInitialLeaderGEK8s35,
+		failedToRetrieveLock, leaderElectionReadTimeout},
 	logutils.WarningLogs: {cantEnableJIT, podCIDRUnavailable, unableGetNode,
 		objectHasBeenModified, etcdTimeout, endpointRestoreFailed,
 		cantFindIdentityInCache, keyAllocFailedFoundMaster, cantRecreateMasterKey,

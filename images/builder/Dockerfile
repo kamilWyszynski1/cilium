@@ -3,13 +3,10 @@
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
-ARG COMPILERS_IMAGE=quay.io/cilium/image-compilers:1772622536-65b121f@sha256:e24936bb08e93ca6ac0a6deb1f7f2651da109001b28786c6e1a4d31f973f0fcb
-ARG CILIUM_RUNTIME_IMAGE=quay.io/cilium/cilium-runtime:9bd015151cd23c55652a739aaad2459bc875ae3e@sha256:2a9208ebc9a8df0a5529e935b0b7b3960a0470a4e29e8be72d362e09110cb46e
-ARG TESTER_IMAGE=quay.io/cilium/image-tester:1773917420-7a13a3a@sha256:f1f14f4dad14b1b3e4cd5c6433fedd09bd984c44a56ab5010e1326d184075c7e
-ARG GOLANG_IMAGE=docker.io/library/golang:1.26.5@sha256:63f132d58c1f589f0dcda584933a9bb44bfda1150f1506377f5a902f34d86033
-ARG CILIUM_LLVM_IMAGE=quay.io/cilium/cilium-llvm:19.1.7-1772622536-65b121f@sha256:4320b57bde46d6642efeb72e405f699a5e189f8377614900f58f54f2641afdf3
-
-FROM ${COMPILERS_IMAGE} AS compilers-image
+ARG CILIUM_RUNTIME_IMAGE=quay.io/cilium/cilium-runtime:34813ed6cc27ce88df597a7d17f02baf82fbeea3@sha256:2d6243de60530ccf6f1e84cef1496e3bbc8718ca8f73d9680a509307bcf80f0a
+ARG TESTER_IMAGE=quay.io/cilium/image-tester:1785158849-4e7b7fc@sha256:41c24bb3a3fc35232e5d5f0cc87eb50765a857b08e4b9fda7075629b2c7f2bef
+ARG GOLANG_IMAGE=docker.io/library/golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
+ARG CILIUM_LLVM_IMAGE=quay.io/cilium/cilium-llvm:19.1.7-1782898005-bed4da5@sha256:270bf0e70853c388b72c2247e4ade91d35d74898e2ec12edd5b72ace9ee34333
 
 FROM ${GOLANG_IMAGE} AS golang-dist
 
@@ -52,8 +49,6 @@ RUN \
     apt-get purge --auto-remove && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-COPY --from=compilers-image /usr/lib/aarch64-linux-gnu /usr/lib/aarch64-linux-gnu
 
 COPY --from=golang-dist /usr/local/go /usr/local/go
 RUN mkdir -p /go

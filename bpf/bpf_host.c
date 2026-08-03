@@ -154,6 +154,7 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 	int ret, zero __maybe_unused = 0;
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
+	const struct endpoint_info *ep;
 
 	if (!revalidate_data(ctx, &data, &data_end, &ip6))
 		return DROP_INVALID;
@@ -187,6 +188,15 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 		}
 	}
 
+	/* See IPv4 path for comments. */
+	if (is_defined(ENABLE_WIREGUARD) && CONFIG(encryption_strict_ingress) &&
+	    !from_host && identity_is_cluster(secctx) &&
+	    !identity_is_remote_node(secctx)) {
+		ep = lookup_ip6_endpoint(ip6);
+		if (ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
+			return DROP_UNENCRYPTED_TRAFFIC;
+	}
+
 #ifdef ENABLE_NODEPORT
 	if (!from_host) {
 		if (!ctx_skip_nodeport(ctx)) {
@@ -217,7 +227,10 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 
 	if (from_host) {
 		if (ipv6_host_policy_egress_lookup(ctx, secctx, ipcache_srcid, ip6, ct_buffer)) {
-			if (unlikely(ct_buffer->ret < 0))
+			/* Tolerate L4 protocol not supported by CT and defer the
+			 * decision to the egress policies if any and applicable.
+			 */
+			if (unlikely(ct_buffer->ret < 0) && ct_buffer->ret != DROP_CT_UNKNOWN_PROTO)
 				return ct_buffer->ret;
 			need_hostfw = true;
 			is_host_id = secctx == HOST_ID;
@@ -228,7 +241,10 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 			return DROP_INVALID;
 
 		if (ipv6_host_policy_ingress_lookup(ctx, ip6, ct_buffer)) {
-			if (unlikely(ct_buffer->ret < 0))
+			/* Tolerate L4 protocol not supported by CT and defer the
+			 * decision to the ingress policies if any and applicable.
+			 */
+			if (unlikely(ct_buffer->ret < 0) && ct_buffer->ret != DROP_CT_UNKNOWN_PROTO)
 				return ct_buffer->ret;
 			need_hostfw = true;
 		}
@@ -329,24 +345,12 @@ handle_ipv6_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	}
 #endif /* ENABLE_SRV6 */
 
-	/* Lookup IPv6 address in list of local endpoints */
-	ep = lookup_ip6_endpoint(ip6);
-
-	/* Strict ingress encryption enforcement: drop cluster-internal pod
-	 * traffic that would reach a local pod from a netdev. Legitimate
-	 * decrypted traffic is delivered directly from cil_from_wireguard
-	 * via a bpf redirect or the stack.
-	 */
-	if (is_defined(ENABLE_WIREGUARD) && CONFIG(encryption_strict_ingress) &&
-	    !from_host && identity_is_cluster(secctx) &&
-	    !identity_is_remote_node(secctx) &&
-	    ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
-		return DROP_UNENCRYPTED_TRAFFIC;
-
 	/* See the equivalent v4 path for comments */
 	if (!from_host && !CONFIG(enable_bpf_host_routing))
 		return CTX_ACT_OK;
 
+	/* Lookup IPv6 address in list of local endpoints */
+	ep = lookup_ip6_endpoint(ip6);
 	if (ep) {
 		/* Let through packets to the node-ip so they are
 		 * processed by the local ip stack.
@@ -459,9 +463,11 @@ int tail_handle_ipv6_cont_from_netdev(struct __ctx_buff *ctx)
 
 	ret = tail_handle_ipv6_cont(ctx, src_sec_identity, false, &ext_err);
 
-	if (IS_ERR(ret))
+	if (IS_ERR(ret)) {
+		ret = frag_not_found_world(ret, src_sec_identity);
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  METRIC_INGRESS);
+	}
 
 	return ret;
 }
@@ -498,9 +504,11 @@ tail_handle_ipv6(struct __ctx_buff *ctx, __u32 ipcache_srcid, const bool from_ho
 	}
 
 	/* Catch errors from both handle_ipv6 and tail_call_internal here. */
-	if (IS_ERR(ret))
+	if (IS_ERR(ret)) {
+		ret = frag_not_found_world(ret, src_sec_identity);
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  METRIC_INGRESS);
+	}
 
 	return ret;
 }
@@ -610,6 +618,7 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 	bool __maybe_unused is_host_id = false;
 	void *data, *data_end;
 	struct iphdr *ip4;
+	const struct endpoint_info *ep;
 	int zero __maybe_unused = 0;
 
 	if (!revalidate_data(ctx, &data, &data_end, &ip4))
@@ -623,6 +632,23 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 
 		if (ipfrag_is_fragment(fraginfo))
 			return DROP_FRAG_NOSUPPORT;
+	}
+
+	/* Strict ingress encryption enforcement: drop cluster-internal pod
+	 * traffic that would reach a local pod from a netdev. Legitimate
+	 * decrypted traffic is delivered directly from cil_from_wireguard
+	 * via a bpf redirect or the stack.
+	 *
+	 * This must run before NodePort/HostPort DNAT, otherwise HostPort
+	 * traffic addressed to a node IP will be judged against the post-DNAT
+	 * pod backend address and dropped.
+	 */
+	if (is_defined(ENABLE_WIREGUARD) && CONFIG(encryption_strict_ingress) &&
+	    !from_host && identity_is_cluster(secctx) &&
+	    !identity_is_remote_node(secctx)) {
+		ep = lookup_ip4_endpoint(ip4);
+		if (ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
+			return DROP_UNENCRYPTED_TRAFFIC;
 	}
 
 #ifdef ENABLE_NODEPORT
@@ -655,7 +681,10 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 	if (from_host) {
 		/* We're on the egress path of cilium_host. */
 		if (ipv4_host_policy_egress_lookup(ctx, secctx, ipcache_srcid, ip4, ct_buffer)) {
-			if (unlikely(ct_buffer->ret < 0))
+			/* Tolerate L4 protocol not supported by CT and defer the
+			 * decision to the egress policies if any and applicable.
+			 */
+			if (unlikely(ct_buffer->ret < 0) && ct_buffer->ret != DROP_CT_UNKNOWN_PROTO)
 				return ct_buffer->ret;
 			need_hostfw = true;
 			is_host_id = secctx == HOST_ID;
@@ -667,7 +696,10 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 secctx __maybe_unused,
 
 		/* We're on the ingress path of the native device. */
 		if (ipv4_host_policy_ingress_lookup(ctx, ip4, ct_buffer)) {
-			if (unlikely(ct_buffer->ret < 0))
+			/* Tolerate L4 protocol not supported by CT and defer the
+			 * decision to the ingress policies if any and applicable.
+			 */
+			if (unlikely(ct_buffer->ret < 0) && ct_buffer->ret != DROP_CT_UNKNOWN_PROTO)
 				return ct_buffer->ret;
 			need_hostfw = true;
 		}
@@ -744,20 +776,6 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	}
 #endif /* ENABLE_HOST_FIREWALL */
 
-	/* Lookup IPv4 address in list of local endpoints and host IPs */
-	ep = lookup_ip4_endpoint(ip4);
-
-	/* Strict ingress encryption enforcement: drop cluster-internal pod
-	 * traffic that would reach a local pod from a netdev. Legitimate
-	 * decrypted traffic is delivered directly from cil_from_wireguard
-	 * via a bpf redirect or the stack.
-	 */
-	if (is_defined(ENABLE_WIREGUARD) && CONFIG(encryption_strict_ingress) &&
-	    !from_host && identity_is_cluster(secctx) &&
-	    !identity_is_remote_node(secctx) &&
-	    ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY))
-		return DROP_UNENCRYPTED_TRAFFIC;
-
 	/* Without bpf_redirect_neigh() helper, we cannot redirect a
 	 * packet to a local endpoint in the direct routing mode, as
 	 * the redirect bypasses nf_conntrack table. This makes a
@@ -770,6 +788,8 @@ handle_ipv4_cont(struct __ctx_buff *ctx, __u32 secctx, const bool from_host,
 	if (!from_host && !CONFIG(enable_bpf_host_routing))
 		return CTX_ACT_OK;
 
+	/* Lookup IPv4 address in list of local endpoints and host IPs */
+	ep = lookup_ip4_endpoint(ip4);
 	if (ep) {
 		int l3_off = ETH_HLEN;
 
@@ -928,9 +948,11 @@ int tail_handle_ipv4_cont_from_netdev(struct __ctx_buff *ctx)
 
 	ret = tail_handle_ipv4_cont(ctx, src_sec_identity, false, &ext_err);
 
-	if (IS_ERR(ret))
+	if (IS_ERR(ret)) {
+		ret = frag_not_found_world(ret, src_sec_identity);
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  METRIC_INGRESS);
+	}
 
 	return ret;
 }
@@ -967,9 +989,11 @@ tail_handle_ipv4(struct __ctx_buff *ctx, __u32 ipcache_srcid, const bool from_ho
 	}
 
 	/* Catch errors from both handle_ipv4 and tail_call_internal here. */
-	if (IS_ERR(ret))
+	if (IS_ERR(ret)) {
+		ret = frag_not_found_world(ret, src_sec_identity);
 		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
 						  METRIC_INGRESS);
+	}
 
 	return ret;
 }

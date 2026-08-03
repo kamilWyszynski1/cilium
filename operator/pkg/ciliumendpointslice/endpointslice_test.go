@@ -4,7 +4,6 @@
 package ciliumendpointslice
 
 import (
-	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -57,8 +56,9 @@ func TestFCFSModeSyncCESsInLocalCacheDefault(t *testing.T) {
 		}),
 	)
 	hive.Start(log, t.Context())
-	r = newDefaultReconciler(t.Context(), fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, ciliumEndpoint, ciliumEndpointSlice, cesMetrics)
 	cesStore, _ := ciliumEndpointSlice.Store(t.Context())
+	cepStore, _ := ciliumEndpoint.Store(t.Context())
+	r = newDefaultReconciler(fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, cepStore, cesStore, cesMetrics)
 	rateLimitConfig, err := getRateLimitConfig(params{Cfg: defaultConfig})
 	assert.NoError(t, err)
 	cesController := &DefaultController{
@@ -69,6 +69,7 @@ func TestFCFSModeSyncCESsInLocalCacheDefault(t *testing.T) {
 			rateLimit:           rateLimitConfig,
 			enqueuedAt:          make(map[CESKey]time.Time),
 			doReconciler:        r,
+			cond:                *sync.NewCond(&lock.Mutex{}),
 		},
 		manager:        m,
 		reconciler:     r,
@@ -80,21 +81,39 @@ func TestFCFSModeSyncCESsInLocalCacheDefault(t *testing.T) {
 	cep2 := tu.CreateManagerEndpoint("cep2", 1, "node2")
 	cep3 := tu.CreateManagerEndpoint("cep3", 2, "node3")
 	cep4 := tu.CreateManagerEndpoint("cep4", 2, "node2")
+	cepStore.CacheStore().Add(tu.CreateStoreEndpoint("cep1", "ns", 1))
+	cepStore.CacheStore().Add(tu.CreateStoreEndpoint("cep2", "ns", 1))
+	cepStore.CacheStore().Add(tu.CreateStoreEndpoint("cep3", "ns", 2))
+	cepStore.CacheStore().Add(tu.CreateStoreEndpoint("cep4", "ns", 2))
 	ces1 := tu.CreateStoreEndpointSlice("ces1", "ns", []cilium_v2a1.CoreCiliumEndpoint{cep1, cep2, cep3, cep4})
 	cesStore.CacheStore().Add(ces1)
+
 	cep5 := tu.CreateManagerEndpoint("cep5", 1, "node1")
 	cep6 := tu.CreateManagerEndpoint("cep6", 1, "node2")
 	cep7 := tu.CreateManagerEndpoint("cep7", 2, "node3")
+	cepStore.CacheStore().Add(tu.CreateStoreEndpoint("cep5", "ns", 1))
+	cepStore.CacheStore().Add(tu.CreateStoreEndpoint("cep6", "ns", 1))
+	// cep7 is intentionally NOT added to the CEP store, simulating a pod that
+	// was deleted while the operator was down. The bootstrap must drop it from
+	// the mapping.
 	ces2 := tu.CreateStoreEndpointSlice("ces2", "ns", []cilium_v2a1.CoreCiliumEndpoint{cep5, cep6, cep7})
 	cesStore.CacheStore().Add(ces2)
 
-	cesController.syncCESsInLocalCache(t.Context())
+	// Subscribe after seeding so the replay picks up the objects we injected.
+	cepEvents := ciliumEndpoint.Events(t.Context())
+	cesEvents := ciliumEndpointSlice.Events(t.Context())
+	cesController.syncCESsInLocalCache(cepEvents, cesEvents)
 
 	mapping := m.mapping
 
 	for _, ces := range []*cilium_v2a1.CiliumEndpointSlice{ces1, ces2} {
 		for _, cep := range ces.Endpoints {
 			cesN, _ := mapping.getCESName(NewCEPName(cep.Name, "ns"))
+			if cep.Name == "cep7" {
+				assert.Empty(t, cesN, "stale cep7 should not have a CES mapping")
+				continue
+			}
+
 			// ensure that the CEP is mapped to the correct CES
 			assert.Equal(t, cesN, CESName(ces.Name))
 		}
@@ -132,7 +151,9 @@ func TestDifferentSpeedQueuesDefault(t *testing.T) {
 	)
 	hive.Start(log, t.Context())
 
-	r = newDefaultReconciler(t.Context(), fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, ciliumEndpoint, ciliumEndpointSlice, cesMetrics)
+	cepStore, _ := ciliumEndpoint.Store(t.Context())
+	cesStore, _ := ciliumEndpointSlice.Store(t.Context())
+	r = newDefaultReconciler(fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, cepStore, cesStore, cesMetrics)
 
 	rateLimitConfig, err := getRateLimitConfig(params{Cfg: defaultConfig})
 	assert.NoError(t, err)
@@ -147,13 +168,12 @@ func TestDifferentSpeedQueuesDefault(t *testing.T) {
 			priorityNamespaces:  make(map[string]struct{}),
 			syncDelay:           0,
 			doReconciler:        r,
+			cond:                *sync.NewCond(&lock.Mutex{}),
 		},
 		manager:        m,
 		reconciler:     r,
 		ciliumEndpoint: ciliumEndpoint,
 	}
-	cesController.cond = *sync.NewCond(&lock.Mutex{})
-	cesController.context, cesController.contextCancel = context.WithCancel(t.Context())
 	cesController.priorityNamespaces["FastNamespace"] = struct{}{}
 	cesController.initializeQueue()
 	var ns = "NotSoImportant"
@@ -187,7 +207,7 @@ func TestDifferentSpeedQueuesDefault(t *testing.T) {
 	}
 
 	for i := range 10 {
-		cesController.processNextWorkItem()
+		cesController.processNextWorkItem(t.Context())
 		if i < 4 {
 			standardQueueLen = 6
 			fastQueueLen = 3 - i
@@ -236,7 +256,9 @@ func TestCESManagementDefault(t *testing.T) {
 	)
 	hive.Start(log, t.Context())
 
-	r = newDefaultReconciler(t.Context(), fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, ciliumEndpoint, ciliumEndpointSlice, cesMetrics)
+	cepStore, _ := ciliumEndpoint.Store(t.Context())
+	cesStore, _ := ciliumEndpointSlice.Store(t.Context())
+	r = newDefaultReconciler(fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, cepStore, cesStore, cesMetrics)
 
 	rateLimitConfig, err := getRateLimitConfig(params{Cfg: defaultConfig})
 	assert.NoError(t, err)
@@ -251,13 +273,12 @@ func TestCESManagementDefault(t *testing.T) {
 			priorityNamespaces:  make(map[string]struct{}),
 			syncDelay:           0,
 			doReconciler:        r,
+			cond:                *sync.NewCond(&lock.Mutex{}),
 		},
 		manager:        m,
 		reconciler:     r,
 		ciliumEndpoint: ciliumEndpoint,
 	}
-	cesController.cond = *sync.NewCond(&lock.Mutex{})
-	cesController.context, cesController.contextCancel = context.WithCancel(t.Context())
 	cesController.initializeQueue()
 	var ns = "ns"
 
@@ -268,7 +289,7 @@ func TestCESManagementDefault(t *testing.T) {
 	}, time.Second); err != nil {
 		assert.Equal(t, 1, cesController.standardQueue.Len())
 	}
-	cesController.processNextWorkItem()
+	cesController.processNextWorkItem(t.Context())
 	//A CEP is enqueued and processed. Then, the same CEP (and CES) is enqueued
 	//to test if the CESStore works properly and if the associated CES can be found in the store
 	cesController.onEndpointUpdate(cep1)
@@ -327,12 +348,12 @@ func TestFCFSModeSyncCESsInLocalCache(t *testing.T) {
 	tlog := hivetest.Logger(t)
 	hive.Start(tlog, t.Context())
 	labelsfilter.ParseLabelPrefixCfg(tlog, nil, nil, "")
-	r = newSlimReconciler(t.Context(), fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, ciliumEndpointSlice, pods, ciliumIdentity, ciliumNode, namespace, cesMetrics, false, false)
 	cesStore, _ := ciliumEndpointSlice.Store(t.Context())
 	nodeStore, _ := ciliumNode.Store(t.Context())
 	cidStore, _ := ciliumIdentity.Store(t.Context())
 	podStore, _ := pods.Store(t.Context())
 	nsStore, _ := namespace.Store(t.Context())
+	r = newSlimReconciler(fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, cesStore, podStore, cidStore, nodeStore, nsStore, cesMetrics, false, false)
 	rateLimitConfig, err := getRateLimitConfig(params{Cfg: defaultConfig})
 	assert.NoError(t, err)
 	cesController := &SlimController{
@@ -347,6 +368,7 @@ func TestFCFSModeSyncCESsInLocalCache(t *testing.T) {
 			doReconciler:        r,
 			metrics:             cesMetrics,
 			priorityNamespaces:  make(map[string]struct{}),
+			cond:                *sync.NewCond(&lock.Mutex{}),
 		},
 		ipsecEnabled:   false,
 		wgEnabled:      false,
@@ -355,7 +377,6 @@ func TestFCFSModeSyncCESsInLocalCache(t *testing.T) {
 		pods:           pods,
 		ciliumIdentity: ciliumIdentity,
 	}
-	cesController.cond = *sync.NewCond(&lock.Mutex{})
 	cesController.initializeQueue()
 
 	node1 := tu.CreateStoreNode("node1")
@@ -398,7 +419,7 @@ func TestFCFSModeSyncCESsInLocalCache(t *testing.T) {
 	ces2 := tu.CreateStoreEndpointSlice("ces2", "ns", []cilium_v2a1.CoreCiliumEndpoint{cep5, cep6, cep7})
 	cesStore.CacheStore().Add(ces2)
 
-	cesController.syncCESsInLocalCache(t.Context())
+	cesController.syncCESsInLocalCache(ciliumNode.Events(t.Context()), ciliumIdentity.Events(t.Context()), ciliumEndpointSlice.Events(t.Context()), pods.Events(t.Context()))
 
 	cache := m.mapping
 
@@ -455,7 +476,12 @@ func TestDifferentSpeedQueues(t *testing.T) {
 	hive.Start(tlog, t.Context())
 	labelsfilter.ParseLabelPrefixCfg(tlog, nil, nil, "")
 
-	r = newSlimReconciler(t.Context(), fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, ciliumEndpointSlice, pods, ciliumIdentity, ciliumNode, namespace, cesMetrics, false, false)
+	cesStore, _ := ciliumEndpointSlice.Store(t.Context())
+	nodeStore, _ := ciliumNode.Store(t.Context())
+	cidStore, _ := ciliumIdentity.Store(t.Context())
+	podStore, _ := pods.Store(t.Context())
+	nsStore, _ := namespace.Store(t.Context())
+	r = newSlimReconciler(fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, cesStore, podStore, cidStore, nodeStore, nsStore, cesMetrics, false, false)
 
 	rateLimitConfig, err := getRateLimitConfig(params{Cfg: defaultConfig})
 	assert.NoError(t, err)
@@ -471,6 +497,7 @@ func TestDifferentSpeedQueues(t *testing.T) {
 			doReconciler:        r,
 			metrics:             cesMetrics,
 			priorityNamespaces:  make(map[string]struct{}),
+			cond:                *sync.NewCond(&lock.Mutex{}),
 		},
 		ipsecEnabled:   false,
 		wgEnabled:      false,
@@ -479,8 +506,6 @@ func TestDifferentSpeedQueues(t *testing.T) {
 		pods:           pods,
 		ciliumIdentity: ciliumIdentity,
 	}
-	cesController.cond = *sync.NewCond(&lock.Mutex{})
-	cesController.context, cesController.contextCancel = context.WithCancel(t.Context())
 	cesController.priorityNamespaces["FastNamespace"] = struct{}{}
 	cesController.initializeQueue()
 	var ns = "NotSoImportant"
@@ -514,7 +539,7 @@ func TestDifferentSpeedQueues(t *testing.T) {
 	}
 
 	for i := range 10 {
-		cesController.processNextWorkItem()
+		cesController.processNextWorkItem(t.Context())
 		if i < 4 {
 			standardQueueLen = 6
 			fastQueueLen = 3 - i
@@ -576,10 +601,12 @@ func TestCESManagement(t *testing.T) {
 	hive.Start(tlog, t.Context())
 	labelsfilter.ParseLabelPrefixCfg(tlog, nil, nil, "")
 
-	r = newSlimReconciler(t.Context(), fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, ciliumEndpointSlice, pods, ciliumIdentity, ciliumNode, namespace, cesMetrics, false, false)
+	cesStore, _ := ciliumEndpointSlice.Store(t.Context())
+	podStore, _ := pods.Store(t.Context())
 	nodeStore, _ := ciliumNode.Store(t.Context())
 	cidStore, _ := ciliumIdentity.Store(t.Context())
 	nsStore, _ := namespace.Store(t.Context())
+	r = newSlimReconciler(fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, cesStore, podStore, cidStore, nodeStore, nsStore, cesMetrics, false, false)
 
 	rateLimitConfig, err := getRateLimitConfig(params{Cfg: defaultConfig})
 	assert.NoError(t, err)
@@ -595,6 +622,7 @@ func TestCESManagement(t *testing.T) {
 			doReconciler:        r,
 			metrics:             cesMetrics,
 			priorityNamespaces:  make(map[string]struct{}),
+			cond:                *sync.NewCond(&lock.Mutex{}),
 		},
 		ipsecEnabled:   false,
 		wgEnabled:      false,
@@ -603,8 +631,6 @@ func TestCESManagement(t *testing.T) {
 		pods:           pods,
 		ciliumIdentity: ciliumIdentity,
 	}
-	cesController.cond = *sync.NewCond(&lock.Mutex{})
-	cesController.context, cesController.contextCancel = context.WithCancel(t.Context())
 	cesController.initializeQueue()
 	var ns = "ns"
 
@@ -628,7 +654,7 @@ func TestCESManagement(t *testing.T) {
 	}, time.Second); err != nil {
 		assert.Equal(t, 1, cesController.standardQueue.Len())
 	}
-	cesController.processNextWorkItem()
+	cesController.processNextWorkItem(t.Context())
 	//A CEP is enqueued and processed. Then, the same CEP (and CES) is enqueued
 	//to test if the CESStore works properly and if the associated CES can be found in the store
 	cesController.onPodUpdate(pod1)
@@ -649,7 +675,19 @@ func TestCESManagement(t *testing.T) {
 	hive.Stop(tlog, t.Context())
 }
 
-func TestSyncCESsInLocalCacheDeletedCID(t *testing.T) {
+// TestSyncCESsInLocalCacheOperatorDowntime covers three scenarios that can
+// happen while the operator is down and must be handled correctly on the
+// next bootstrap:
+//   - a CID is deleted → pods that used it should still be tracked but
+//     their entries in cepData have no resolvable identity yet (reconciler
+//     filters those at write time).
+//   - a pod is deleted → its entry in the CES on the API side is stale;
+//     bootstrap must skip it and mark the CES dirty so the reconciler
+//     rewrites it without the deleted pod.
+//   - a pod is added → it exists in the Pod store but no CES lists it yet;
+//     bootstrap's phase 5 must place it into an existing CES (with room)
+//     rather than creating a phantom one.
+func TestSyncCESsInLocalCacheOperatorDowntime(t *testing.T) {
 	log := hivetest.Logger(t)
 	var r *slimReconciler
 	var fakeClient *k8sClient.FakeClientset
@@ -688,12 +726,12 @@ func TestSyncCESsInLocalCacheDeletedCID(t *testing.T) {
 	tlog := hivetest.Logger(t)
 	hive.Start(tlog, t.Context())
 	labelsfilter.ParseLabelPrefixCfg(tlog, nil, nil, "")
-	r = newSlimReconciler(t.Context(), fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, ciliumEndpointSlice, pods, ciliumIdentity, ciliumNode, namespace, cesMetrics, false, false)
 	cesStore, _ := ciliumEndpointSlice.Store(t.Context())
 	nodeStore, _ := ciliumNode.Store(t.Context())
 	cidStore, _ := ciliumIdentity.Store(t.Context())
 	podStore, _ := pods.Store(t.Context())
 	nsStore, _ := namespace.Store(t.Context())
+	r = newSlimReconciler(fakeClient.CiliumFakeClientset.CiliumV2alpha1(), m, log, cesStore, podStore, cidStore, nodeStore, nsStore, cesMetrics, false, false)
 	rateLimitConfig, err := getRateLimitConfig(params{Cfg: defaultConfig})
 	assert.NoError(t, err)
 	cesController := &SlimController{
@@ -708,6 +746,8 @@ func TestSyncCESsInLocalCacheDeletedCID(t *testing.T) {
 			doReconciler:        r,
 			metrics:             cesMetrics,
 			priorityNamespaces:  make(map[string]struct{}),
+			syncDelay:           0,
+			cond:                *sync.NewCond(&lock.Mutex{}),
 		},
 		ipsecEnabled:   false,
 		wgEnabled:      false,
@@ -716,7 +756,6 @@ func TestSyncCESsInLocalCacheDeletedCID(t *testing.T) {
 		pods:           pods,
 		ciliumIdentity: ciliumIdentity,
 	}
-	cesController.cond = *sync.NewCond(&lock.Mutex{})
 	cesController.initializeQueue()
 
 	node1 := tu.CreateStoreNode("node1")
@@ -733,14 +772,20 @@ func TestSyncCESsInLocalCacheDeletedCID(t *testing.T) {
 	pod4 := cidtest.NewPod("pod4", "ns", tu.TestLbsB, "node2")
 	pod5 := cidtest.NewPod("pod5", "ns", tu.TestLbsA, "node1")
 	pod6 := cidtest.NewPod("pod6", "ns", tu.TestLbsA, "node1")
-	pod7 := cidtest.NewPod("pod7", "ns", tu.TestLbsB, "node1")
+	// pod7 (declared inline as the CES entry below) is intentionally NOT
+	// added to the Pod store, simulating a pod deleted while operator was
+	// down. The CES still lists it.
+	// pod8 exists in the Pod store but no CES lists it yet — simulating a
+	// pod that was created while the operator was down.
+	pod8 := cidtest.NewPod("pod8", "ns", tu.TestLbsB, "node1")
 	podStore.CacheStore().Add(pod1)
 	podStore.CacheStore().Add(pod2)
 	podStore.CacheStore().Add(pod3)
 	podStore.CacheStore().Add(pod4)
 	podStore.CacheStore().Add(pod5)
 	podStore.CacheStore().Add(pod6)
-	podStore.CacheStore().Add(pod7)
+	// pod7 is intentionally NOT added to the Pod store.
+	podStore.CacheStore().Add(pod8)
 
 	cid1 := cidtest.NewCIDWithNamespace("1", pod1, ns)
 	cid2 := cidtest.NewCIDWithNamespace("2", pod3, ns)
@@ -759,21 +804,37 @@ func TestSyncCESsInLocalCacheDeletedCID(t *testing.T) {
 	ces2 := tu.CreateStoreEndpointSlice("ces2", "ns", []cilium_v2a1.CoreCiliumEndpoint{cep5, cep6, cep7})
 	cesStore.CacheStore().Add(ces2)
 
-	// Delete CID to simulate the scenario where CID deleted during Operator restart
+	// Delete CID1 to simulate the scenario where a CID was deleted while
+	// the operator was down.
 	cidStore.CacheStore().Delete(cid1)
 
-	cesController.syncCESsInLocalCache(t.Context())
-	// Immediately after sync, CESCache does not contain pods with CID1
+	cesController.syncCESsInLocalCache(ciliumNode.Events(t.Context()), ciliumIdentity.Events(t.Context()), ciliumEndpointSlice.Events(t.Context()), pods.Events(t.Context()))
+
+	// CID1 is gone from the identity mapping.
 	assert.NotContains(t, m.mapping.cidToGidLabels, cid1)
+
+	// Pods that still exist are in cepData; pod7 (deleted while down) is not.
 	for _, pod := range podStore.List() {
-		if pod.Name == "pod1" || pod.Name == "pod2" || pod.Name == "pod5" || pod.Name == "pod6" {
-			assert.NotContains(t, m.mapping.cepData, NewCEPName(pod.Name, "ns"))
-		} else {
-			assert.Contains(t, m.mapping.cepData, NewCEPName(pod.Name, "ns"))
-		}
+		assert.Contains(t, m.mapping.cepData, NewCEPName(pod.Name, "ns"))
+	}
+	assert.NotContains(t, m.mapping.cepData, NewCEPName("pod7", "ns"))
+
+	// pod8 (added while down) was placed in some CES via phase 5's
+	// onPodUpdate — either into an existing CES with capacity or a fresh
+	// one if none had room.
+	_, ok := m.mapping.getCESName(NewCEPName("pod8", "ns"))
+	assert.True(t, ok, "pod8 should be placed in a CES")
+
+	// Some CES(es) should have been enqueued for reconciliation:
+	// - ces2 because pod7 was skipped as stale.
+	// - the CES that received pod8 (via onPodUpdate's enqueue).
+	if err := testutils.WaitUntil(func() bool {
+		return cesController.fastQueue.Len()+cesController.standardQueue.Len() >= 1
+	}, time.Second); err != nil {
+		t.Fatalf("expected CES(es) to be enqueued after bootstrap; queues empty")
 	}
 
-	// After some time, the CESController should reprocess the CEPs
+	// Calling onPodUpdate again is idempotent for already-placed pods.
 	cesController.onPodUpdate(pod1)
 	cesController.onPodUpdate(pod2)
 	cesController.onPodUpdate(pod5)

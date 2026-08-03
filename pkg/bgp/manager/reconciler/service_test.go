@@ -2839,6 +2839,9 @@ func newServiceTestFixture(t *testing.T, config option.BGPConfig) *svcTestFixtur
 					Logger:                  p.Logger,
 					DB:                      f.svcReconciler.db,
 					DesiredRoutePolicyTable: f.svcReconciler.desiredRoutePolicyTable,
+					DaemonConfig: &ciliumoption.DaemonConfig{
+						EnableBGPControlPlane: true,
+					},
 				}).Reconciler.(*RoutePolicyReconciler)
 			}),
 		),
@@ -2939,15 +2942,15 @@ func advertisedPoliciesAttributesMatch(
 	response, err := bgpInstance.Router.GetRoutePolicies(context.Background())
 	req.NoError(err)
 
-	desiredStatementsByObject := make(map[routePolicyObjectKey][]*bgpTables.DesiredRoutePolicy)
+	desiredStatementsByObject := make(map[bgpTables.DesiredRoutePolicyObjectKey][]*bgpTables.DesiredRoutePolicy)
 	for _, statement := range expectedRoutePolicies {
-		policyKey := getRoutePolicyObjectKey(statement)
+		policyKey := statement.GetPolicyObjectKey()
 		desiredStatementsByObject[policyKey] = append(desiredStatementsByObject[policyKey], statement)
 	}
 
 	expectedGroupedPolicies := make(RoutePolicyMap, len(desiredStatementsByObject))
 	for policyKey, statements := range desiredStatementsByObject {
-		policy, err := desiredRoutePolicyFromStatements(policyKey, statements)
+		policy, err := routePolicyFromStatements(policyKey, statements)
 		req.NoError(err)
 		if policy != nil {
 			expectedGroupedPolicies[policy.Name] = policy
@@ -3040,8 +3043,8 @@ func TestServiceReconcilerMetadataPartialFailure(t *testing.T) {
 		}
 		oldPath := types.MustNewPathForPrefix(netip.MustParsePrefix(ingressV4Prefix)) // non-aggregated prefix
 
-		oldPolicy, err := desiredRoutePolicyFromStatements(
-			getRoutePolicyObjectKey(redPeer65001v4LBRP),
+		oldPolicy, err := routePolicyFromStatements(
+			redPeer65001v4LBRP.GetPolicyObjectKey(),
 			[]*bgpTables.DesiredRoutePolicy{redPeer65001v4LBRP},
 		)
 		req.NoError(err)

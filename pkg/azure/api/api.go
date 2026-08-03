@@ -17,7 +17,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v10"
 	"k8s.io/apimachinery/pkg/util/rand"
 
 	"github.com/cilium/cilium/pkg/api/helpers"
@@ -325,7 +325,7 @@ func parseInterface(logger *slog.Logger, iface *armnetwork.Interface, subnets ip
 	}
 
 	if iface.ID != nil {
-		i.SetID(*iface.ID)
+		i.ID = *iface.ID
 	}
 
 	if iface.Name != nil {
@@ -352,7 +352,6 @@ func parseInterface(logger *slog.Logger, iface *armnetwork.Interface, subnets ip
 				if subnet, ok := subnets[i.Subnet.ID]; ok {
 					if subnet.CIDR.IsValid() {
 						i.Subnet.CIDR = iputil.PrefixFrom(subnet.CIDR)
-						i.CIDR = i.Subnet.CIDR //nolint:staticcheck // transitional, see https://github.com/cilium/cilium/issues/46074
 					}
 					i.Gateway = deriveGatewayIP(subnet.CIDR.Addr())
 				}
@@ -379,9 +378,6 @@ func parseInterface(logger *slog.Logger, iface *armnetwork.Interface, subnets ip
 			addr := types.AzureAddress{
 				IP:    iputil.AddrFrom(parsedIP),
 				State: strings.ToLower(string(*ip.Properties.ProvisioningState)),
-			}
-			if ip.Properties.Subnet != nil {
-				addr.Subnet = *ip.Properties.Subnet.ID //nolint:staticcheck // transitional, see https://github.com/cilium/cilium/issues/46074
 			}
 			i.Addresses = append(i.Addresses, addr)
 		}

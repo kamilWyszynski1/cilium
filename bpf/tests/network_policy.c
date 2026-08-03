@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 /* Copyright Authors of Cilium */
 
+#define ENABLE_IPV4
+#define ENABLE_IPV6
+
 #include <bpf/ctx/skb.h>
 #include "common.h"
 #include "pktgen.h"
@@ -9,6 +12,7 @@
 #include <lib/policy.h>
 
 #include "lib/policy.h"
+#include "network_policy_tuples.h"
 
 #define REMOTE_IDENTITY		112233
 
@@ -235,28 +239,40 @@ int network_policy_egress_allow_check(struct __ctx_buff *ctx)
 
 	/* tests that partial aggregates are correctly calculated */
 	TEST("aggregate-for-id", {
+		/* shorthand */
+		__u32 c = AGGREGATE_CLUSTER_ID;
+		__u32 m = AGGREGATE_CLUSTER_MESH_ID;
+		__u32 n = AGGREGATE_REMOTE_NODE_ID;
+		__u32 w = AGGREGATE_WORLD_ID;
+
 		/* all aggregates must aggregate to themselves */
 		assert(aggregate_for_identity(0) == 0);
-		assert(aggregate_for_identity(2) == 2);
-		assert(aggregate_for_identity(6) == 6);
-		assert(aggregate_for_identity(11) == 11);
-		assert(aggregate_for_identity(12) == 12);
+		assert(aggregate_for_identity(c) == c);
+		assert(aggregate_for_identity(m) == m);
+		assert(aggregate_for_identity(n) == n);
+		assert(aggregate_for_identity(w) == w);
 
 		/* in-cluster identity */
-		assert(aggregate_for_identity(400) == POLICY_CLUSTER_ID);
+		assert(aggregate_for_identity(400) == AGGREGATE_CLUSTER_ID);
 		/* cluster-mesh identity */
-		assert(aggregate_for_identity(0x0001aabb) == POLICY_CLUSTER_MESH_ID);
+		assert(aggregate_for_identity(0x0001aabb) == AGGREGATE_CLUSTER_MESH_ID);
 
 		/* world identities */
-		assert(aggregate_for_identity(16777217) == WORLD_ID);
-		assert(aggregate_for_identity(WORLD_IPV4_ID) == WORLD_ID);
-		assert(aggregate_for_identity(WORLD_IPV6_ID) == WORLD_ID);
-		assert(aggregate_for_identity(WORLD_ID) == WORLD_ID);
+		assert(aggregate_for_identity(16777217) == w);
+		assert(aggregate_for_identity(WORLD_IPV4_ID) == 0);
+		assert(aggregate_for_identity(WORLD_IPV6_ID) == 0);
+		assert(aggregate_for_identity(WORLD_ID) == 0);
 
 		/* remote node identities */
-		assert(aggregate_for_identity(REMOTE_NODE_ID) == REMOTE_NODE_ID);
-		assert(aggregate_for_identity(KUBE_APISERVER_NODE_ID) == REMOTE_NODE_ID);
-		assert(aggregate_for_identity(33554432) == REMOTE_NODE_ID);
+		assert(aggregate_for_identity(REMOTE_NODE_ID) == 0);
+		assert(aggregate_for_identity(KUBE_APISERVER_NODE_ID) == 0);
+		assert(aggregate_for_identity(33554432) == n);
+	});
+
+    /* tests that aggregates match the userspace implementation */
+	TEST("aggregate-for-id-userspace", {
+		for (unsigned long i = 0; i < ARRAY_SIZE(aggregate_nid_in); i++)
+			assert(aggregate_for_identity(aggregate_nid_in[i]) == aggregate_nid_out[i]);
 	});
 
 	test_finish();

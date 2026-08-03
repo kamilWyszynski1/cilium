@@ -162,7 +162,6 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *config.Config) erro
 	cDefinesMap["CILIUM_LB_BACKENDS_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", cfg.LBConfig.LBBackendMapEntries)
 	cDefinesMap["CILIUM_LB_REV_NAT_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", cfg.LBConfig.LBRevNatEntries)
 	cDefinesMap["CILIUM_LB_AFFINITY_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", cfg.LBConfig.LBAffinityMapEntries)
-	cDefinesMap["CILIUM_LB_SOURCE_RANGE_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", cfg.LBConfig.LBSourceRangeMapEntries)
 	cDefinesMap["CILIUM_LB_MAGLEV_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", cfg.LBConfig.LBMaglevMapEntries)
 	cDefinesMap["CILIUM_LB_SKIP_MAP_MAX_ENTRIES"] = fmt.Sprintf("%d", lbmaps.SkipLBMapMaxEntries)
 
@@ -220,10 +219,6 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *config.Config) erro
 
 	if option.Config.EnableEncryptionStrictModeEgress {
 		cDefinesMap["ENCRYPTION_STRICT_MODE_EGRESS"] = "1"
-
-		// when parsing the user input we only accept ipv4 addresses
-		cDefinesMap["STRICT_IPV4_NET"] = fmt.Sprintf("%#x", byteorder.NetIPAddrToHost32(option.Config.EncryptionStrictEgressCIDR.Addr()))
-		cDefinesMap["STRICT_IPV4_NET_SIZE"] = fmt.Sprintf("%d", option.Config.EncryptionStrictEgressCIDR.Bits())
 
 		cDefinesMap["IPV4_ENCRYPT_IFACE"] = fmt.Sprintf("%#x", byteorder.NetIPAddrToHost32(cfg.NodeIPv4))
 
@@ -323,29 +318,6 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *config.Config) erro
 		} else {
 			cDefinesMap["DSR_ENCAP_MODE"] = fmt.Sprintf("%d", dsrEncapInv)
 		}
-		if option.Config.EnableIPv4 {
-			if option.Config.LoadBalancerRSSv4CIDR != "" {
-				ipv4 := byteorder.NetIPv4ToHost32(option.Config.UnsafeDaemonConfigOption.LoadBalancerRSSv4.IP)
-				ones, _ := option.Config.UnsafeDaemonConfigOption.LoadBalancerRSSv4.Mask.Size()
-				cDefinesMap["IPV4_RSS_PREFIX"] = fmt.Sprintf("%d", ipv4)
-				cDefinesMap["IPV4_RSS_PREFIX_BITS"] = fmt.Sprintf("%d", ones)
-			} else {
-				cDefinesMap["IPV4_RSS_PREFIX"] = "IPV4_DIRECT_ROUTING"
-				cDefinesMap["IPV4_RSS_PREFIX_BITS"] = "32"
-			}
-		}
-		if option.Config.EnableIPv6 {
-			if option.Config.LoadBalancerRSSv6CIDR != "" {
-				ipv6 := option.Config.UnsafeDaemonConfigOption.LoadBalancerRSSv6.IP
-				ones, _ := option.Config.UnsafeDaemonConfigOption.LoadBalancerRSSv6.Mask.Size()
-				extraMacrosMap["IPV6_RSS_PREFIX"] = ipv6.String()
-				fw.WriteString(FmtDefineAddress("IPV6_RSS_PREFIX", ipv6))
-				cDefinesMap["IPV6_RSS_PREFIX_BITS"] = fmt.Sprintf("%d", ones)
-			} else {
-				cDefinesMap["IPV6_RSS_PREFIX"] = "IPV6_DIRECT_ROUTING"
-				cDefinesMap["IPV6_RSS_PREFIX_BITS"] = "128"
-			}
-		}
 
 		if option.Config.NodePortAcceleration != option.NodePortAccelerationDisabled {
 			cDefinesMap["ENABLE_NODEPORT_ACCELERATION"] = "1"
@@ -367,13 +339,7 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *config.Config) erro
 	drd := cfg.DirectRoutingDevice
 	if drd != nil {
 		if option.Config.EnableIPv4 {
-			var ipv4 uint32
-			for _, addr := range drd.Addrs {
-				if addr.Addr.Is4() {
-					ipv4 = byteorder.NetIPAddrToHost32(addr.Addr)
-					break
-				}
-			}
+			ipv4 := preferredIPv4Address(drd.Addrs)
 			cDefinesMap["IPV4_DIRECT_ROUTING"] = fmt.Sprintf("%d", ipv4)
 		}
 		if option.Config.EnableIPv6 {
@@ -645,6 +611,17 @@ func (h *HeaderfileWriter) writeTemplateConfig(fw *bufio.Writer, e endpoint.Conf
 func (h *HeaderfileWriter) WriteTemplateConfig(w io.Writer, e endpoint.Config) error {
 	fw := bufio.NewWriter(w)
 	return h.writeTemplateConfig(fw, e)
+}
+
+func preferredIPv4Address(deviceAddresses []tables.DeviceAddress) uint32 {
+	var ip uint32
+	for _, addr := range tables.SortedAddresses(deviceAddresses) {
+		if addr.Addr.Is4() {
+			ip = byteorder.NetIPAddrToHost32(addr.Addr)
+			break
+		}
+	}
+	return ip
 }
 
 func preferredIPv6Address(deviceAddresses []tables.DeviceAddress) netip.Addr {

@@ -700,6 +700,26 @@ func Test_retryMutation(t *testing.T) {
 }
 
 func Test_envoyHTTPRoutes(t *testing.T) {
+	backend := func(name string, port uint32) model.Backend {
+		return model.Backend{
+			Name:      name,
+			Namespace: "default",
+			Port:      &model.BackendPort{Port: port},
+		}
+	}
+	sourceRule := func(ruleIndex int) *model.HTTPRouteRule {
+		return &model.HTTPRouteRule{
+			Source: model.FullyQualifiedResource{
+				Name:      "route",
+				Namespace: "default",
+				Group:     "gateway.networking.k8s.io",
+				Version:   "v1",
+				Kind:      "HTTPRoute",
+			},
+			RuleIndex: ruleIndex,
+		}
+	}
+
 	t.Run("redirect with x-forwarded-proto and backend", func(t *testing.T) {
 		httpRoutes := []model.HTTPRoute{
 			{
@@ -743,6 +763,105 @@ func Test_envoyHTTPRoutes(t *testing.T) {
 		require.NotNil(t, res[1].GetRoute())
 		require.Equal(t, "default:backend:31337", res[1].GetRoute().GetCluster())
 	})
+	t.Run("backend and redirect with same match preserve order after x-forwarded-proto guard", func(t *testing.T) {
+		httpRoutes := []model.HTTPRoute{
+			{
+				Name:      "Backend",
+				PathMatch: model.StringMatch{Prefix: "/"},
+				Backends: []model.Backend{
+					{
+						Name:      "backend",
+						Namespace: "default",
+						Port:      &model.BackendPort{Port: 31337},
+					},
+				},
+			},
+			{
+				Name:      "Redirect",
+				PathMatch: model.StringMatch{Prefix: "/"},
+				RequestRedirect: &model.HTTPRequestRedirectFilter{
+					Scheme:     ptr.To("https"),
+					Port:       ptr.To(int32(443)),
+					StatusCode: ptr.To(302),
+				},
+			},
+		}
+		res := envoyHTTPRoutes(httpRoutes, []string{"*"}, true, 80, nil)
+		require.Len(t, res, 2)
+		sort.Stable(SortableRoute(res))
+		// Backend Route
+		require.NotNil(t, res[0])
+		require.Equal(t, "/", res[0].Match.GetPrefix())
+		require.Empty(t, res[0].Match.GetHeaders())
+		require.NotNil(t, res[0].GetRoute())
+		require.Equal(t, "default:backend:31337", res[0].GetRoute().GetCluster())
+		// Redirect Route
+		require.NotNil(t, res[1])
+		require.Equal(t, "/", res[1].Match.GetPrefix())
+		require.Len(t, res[1].Match.GetHeaders(), 1)
+		require.Equal(t, "X-Forwarded-Proto", res[1].Match.GetHeaders()[0].Name)
+		require.True(t, res[1].Match.GetHeaders()[0].InvertMatch)
+		require.Equal(t, "https", res[1].Match.GetHeaders()[0].GetStringMatch().GetExact())
+		require.NotNil(t, res[1].GetRedirect())
+		require.Equal(t, "https", res[1].GetRedirect().GetSchemeRedirect())
+		require.Equal(t, uint32(443), res[1].GetRedirect().PortRedirect)
+		require.Equal(t, envoy_config_route_v3.RedirectAction_FOUND, res[1].GetRedirect().ResponseCode)
+	})
+	t.Run("user x-forwarded-proto header contributes to route precedence", func(t *testing.T) {
+		httpRoutes := []model.HTTPRoute{
+			{
+				Name:      "Redirect",
+				PathMatch: model.StringMatch{Prefix: "/"},
+				RequestRedirect: &model.HTTPRequestRedirectFilter{
+					Scheme:     ptr.To("https"),
+					Port:       ptr.To(int32(443)),
+					StatusCode: ptr.To(302),
+				},
+			},
+			{
+				Name:      "Backend",
+				PathMatch: model.StringMatch{Prefix: "/"},
+				HeadersMatch: []model.KeyValueMatch{
+					{
+						Key:   "X-Forwarded-Proto",
+						Match: model.StringMatch{Exact: "https"},
+					},
+				},
+				Backends: []model.Backend{
+					{
+						Name:      "backend",
+						Namespace: "default",
+						Port:      &model.BackendPort{Port: 31337},
+					},
+				},
+			},
+		}
+
+		res := envoyHTTPRoutes(httpRoutes, []string{"*"}, true, 80, nil)
+		require.Len(t, res, 2)
+
+		sort.Stable(SortableRoute(res))
+
+		// Backend Route with user-defined X-Forwarded-Proto header.
+		require.NotNil(t, res[0])
+		require.Equal(t, "/", res[0].Match.GetPrefix())
+		require.Len(t, res[0].Match.GetHeaders(), 1)
+		require.Equal(t, "X-Forwarded-Proto", res[0].Match.GetHeaders()[0].Name)
+		require.False(t, res[0].Match.GetHeaders()[0].InvertMatch)
+		require.Equal(t, "https", res[0].Match.GetHeaders()[0].GetStringMatch().GetExact())
+		require.NotNil(t, res[0].GetRoute())
+		require.Equal(t, "default:backend:31337", res[0].GetRoute().GetCluster())
+
+		// Redirect Route with generated X-Forwarded-Proto guard.
+		require.NotNil(t, res[1])
+		require.Equal(t, "/", res[1].Match.GetPrefix())
+		require.Len(t, res[1].Match.GetHeaders(), 1)
+		require.Equal(t, "X-Forwarded-Proto", res[1].Match.GetHeaders()[0].Name)
+		require.True(t, res[1].Match.GetHeaders()[0].InvertMatch)
+		require.True(t, res[1].Match.GetHeaders()[0].GetStringMatch().GetIgnoreCase())
+		require.Equal(t, "https", res[1].Match.GetHeaders()[0].GetStringMatch().GetExact())
+		require.NotNil(t, res[1].GetRedirect())
+	})
 	t.Run("http route with CORS filter and no backend", func(t *testing.T) {
 		corsPolicy := toAny(&envoy_extensions_filters_http_cors_v3.CorsPolicy{
 			AllowOriginStringMatch: []*envoy_type_matcher_v3.StringMatcher{
@@ -781,6 +900,80 @@ func Test_envoyHTTPRoutes(t *testing.T) {
 		require.NotNil(t, res[0].GetDirectResponse())
 		require.Equal(t, uint32(500), res[0].GetDirectResponse().GetStatus())
 		require.Equal(t, corsPolicy, res[0].GetTypedPerFilterConfig()["envoy.filters.http.cors"])
+	})
+	t.Run("legacy same-match routes aggregate backends", func(t *testing.T) {
+		httpRoutes := []model.HTTPRoute{
+			{
+				PathMatch: model.StringMatch{Exact: "/same-path"},
+				Backends: []model.Backend{
+					backend("backend-v1", 8080),
+				},
+			},
+			{
+				PathMatch: model.StringMatch{Exact: "/same-path"},
+				Backends: []model.Backend{
+					backend("backend-v2", 8080),
+				},
+			},
+		}
+
+		res := envoyHTTPRoutes(httpRoutes, []string{"*"}, true, 80, nil)
+
+		require.Len(t, res, 1)
+		weightedClusters := res[0].GetRoute().GetWeightedClusters()
+		require.NotNil(t, weightedClusters)
+		require.Len(t, weightedClusters.GetClusters(), 2)
+		require.Equal(t, "default:backend-v1:8080", weightedClusters.GetClusters()[0].GetName())
+		require.Equal(t, "default:backend-v2:8080", weightedClusters.GetClusters()[1].GetName())
+	})
+	t.Run("gateway same-match rules remain separate", func(t *testing.T) {
+		httpRoutes := []model.HTTPRoute{
+			{
+				SourceRule: sourceRule(0),
+				PathMatch:  model.StringMatch{Exact: "/same-path"},
+				Backends: []model.Backend{
+					backend("backend-v1", 8080),
+				},
+			},
+			{
+				SourceRule: sourceRule(1),
+				PathMatch:  model.StringMatch{Exact: "/same-path"},
+				Backends: []model.Backend{
+					backend("backend-v2", 8080),
+				},
+			},
+		}
+
+		res := envoyHTTPRoutes(httpRoutes, []string{"*"}, true, 80, nil)
+
+		require.Len(t, res, 2)
+		require.Equal(t, "default:backend-v1:8080", res[0].GetRoute().GetCluster())
+		require.Equal(t, "default:backend-v2:8080", res[1].GetRoute().GetCluster())
+	})
+	t.Run("gateway first same-match rule with missing backend returns direct response", func(t *testing.T) {
+		httpRoutes := []model.HTTPRoute{
+			{
+				SourceRule: sourceRule(0),
+				PathMatch:  model.StringMatch{Exact: "/same-path"},
+				DirectResponse: &model.DirectResponse{
+					StatusCode: 500,
+				},
+			},
+			{
+				SourceRule: sourceRule(1),
+				PathMatch:  model.StringMatch{Exact: "/same-path"},
+				Backends: []model.Backend{
+					backend("backend-v2", 8080),
+				},
+			},
+		}
+
+		res := envoyHTTPRoutes(httpRoutes, []string{"*"}, true, 80, nil)
+
+		require.Len(t, res, 2)
+		require.NotNil(t, res[0].GetDirectResponse())
+		require.Equal(t, uint32(500), res[0].GetDirectResponse().GetStatus())
+		require.Equal(t, "default:backend-v2:8080", res[1].GetRoute().GetCluster())
 	})
 }
 

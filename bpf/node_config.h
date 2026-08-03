@@ -86,9 +86,6 @@
 #define POLICY_PROG_MAP_SIZE ENDPOINTS_MAP_SIZE
 #define CILIUM_IPV4_FRAG_MAP_MAX_ENTRIES 8192
 #define CILIUM_IPV6_FRAG_MAP_MAX_ENTRIES 8192
-#ifndef MONITOR_AGGREGATION
-#define MONITOR_AGGREGATION 5
-#endif
 
 #define CT_MAP_SIZE_TCP 4096
 #define CT_MAP_SIZE_ANY 4096
@@ -98,29 +95,16 @@
 #  ifndef IPV4_DIRECT_ROUTING
 #   define IPV4_DIRECT_ROUTING 0
 #  endif
-#  define IPV4_RSS_PREFIX IPV4_DIRECT_ROUTING
-#  define IPV4_RSS_PREFIX_BITS 32
 # endif
 # ifdef ENABLE_IPV6
 #  ifndef IPV6_DIRECT_ROUTING
 #   define IPV6_DIRECT_ROUTING { .addr = { 0x0, 0x0, 0x0, 0x0, 0x0, 0x0 } }
 #  endif
-#  define IPV6_RSS_PREFIX IPV6_DIRECT_ROUTING
-#  define IPV6_RSS_PREFIX_BITS 128
 # endif
 #endif
 
 #define LB4_SRC_RANGE_MAP_SIZE	1000
 #define LB6_SRC_RANGE_MAP_SIZE	1000
-
-#ifdef ENCRYPTION_STRICT_MODE_EGRESS
-#  ifndef STRICT_IPV4_NET
-#   define STRICT_IPV4_NET	0
-#  endif
-#  ifndef STRICT_IPV4_NET_SIZE
-#   define STRICT_IPV4_NET_SIZE	8
-#  endif
-#endif
 
 #define VLAN_FILTER(ifindex, vlan_id) switch (ifindex) { \
 case 116: \

@@ -88,7 +88,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -101,6 +101,7 @@ jobs:
           login-host: ${{ vars.DOCKER_READ_HOST }}
           login-username: ${{ vars.DOCKER_READ_USERNAME }}
           login-password: ${{ secrets.DOCKER_READ_PASSWORD }}
+          auth-required: ${{ vars.DOCKER_AUTH_REQUIRED }}
 
   mcs-api-conformance-test:
     name: MCS API Conformance Test
@@ -126,7 +127,7 @@ jobs:
           comment_on_pr: false
 
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -163,10 +164,12 @@ jobs:
       # Warning: since this is a privileged workflow, subsequent workflow job
       # steps must take care not to execute untrusted code.
       - name: Checkout pull request branch (NOT TRUSTED)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.vars.outputs.sha }}
           persist-credentials: false
+          # Required by checkout v7+ to fetch fork PR code; see the NOT TRUSTED warning above.
+          allow-unsafe-pr-checkout: true
           path: untrusted
           sparse-checkout: |
             install/kubernetes/cilium
@@ -206,6 +209,7 @@ jobs:
           wait: 0 # The control-plane never becomes ready, since no CNI is present
 
       - name: Create imagePullSecrets
+        if: ${{ vars.DOCKER_AUTH_REQUIRED == 'true' }}
         run: |
           for context in ${{ env.contextName1 }} ${{ env.contextName2 }}; do
             kubectl --context $context create secret docker-registry cilium-registry \
@@ -216,7 +220,7 @@ jobs:
           done
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@e391e739db83a8b888ecf18786af6853c51a0c58 # v0.19.5
+        uses: cilium/cilium-cli@7ca7fc53c20275f5c10ef5f3557076691fd1d720 # v0.19.7
         with:
           skip-build: ${{ env.CILIUM_CLI_SKIP_BUILD }}
           image-repo: ${{ env.CILIUM_CLI_IMAGE_REPO }}
@@ -225,7 +229,7 @@ jobs:
           release-version: ${{ env.CILIUM_CLI_VERSION }}
 
       - name: Install Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # renovate: datasource=golang-version depName=go
           go-version: 1.26.5
@@ -340,6 +344,20 @@ jobs:
           archive: false
           retention-days: 5
           if-no-files-found: ignore
+
+      - name: Features tested on cluster 1
+        uses: ./.github/actions/feature-status
+        with:
+          cilium-cli: "cilium --context ${{ env.contextName1 }}"
+          title: "Summary of all features tested on cluster 1"
+          json-filename: "${{ env.job_name }} (${{ join(matrix.*, ', ') }}) - cluster 1"
+
+      - name: Features tested on cluster 2
+        uses: ./.github/actions/feature-status
+        with:
+          cilium-cli: "cilium --context ${{ env.contextName2 }}"
+          title: "Summary of all features tested on cluster 2"
+          json-filename: "${{ env.job_name }} (${{ join(matrix.*, ', ') }}) - cluster 2"
 
       - name: Run common post steps
         if: ${{ always() && steps.install-cilium.outcome != 'skipped' }}

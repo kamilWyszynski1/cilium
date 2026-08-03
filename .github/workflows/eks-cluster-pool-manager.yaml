@@ -22,7 +22,7 @@ permissions:
 
 env:
   # renovate: datasource=github-releases depName=eksctl-io/eksctl
-  eksctl_version: v0.228.0
+  eksctl_version: v0.229.0
 
 jobs:
   generate-cleanup-matrix:
@@ -34,7 +34,7 @@ jobs:
       empty: ${{ steps.set-matrix.outputs.empty }}
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -79,12 +79,12 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
@@ -203,7 +203,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
@@ -249,7 +249,7 @@ jobs:
       empty: ${{ steps.set-matrix.outputs.empty }}
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -271,19 +271,36 @@ jobs:
           jq '{ "include": [ .include[] | select(.default) ] }' eks.json > /tmp/eks-defaults.json
           jq '{ "include": [ .include[] | select(.default) ] }' aws-cni.json > /tmp/aws-cni-defaults.json
 
-          # Expand matrix with different addon configurations
+          # Expand matrix with different addon configurations.
+          #
+          # The "zones" field MUST match what the conformance-eks.yaml /
+          # conformance-aws-cni.yaml consumers compute from the region, because
+          # setup-eks-cluster hashes "<addons> <zones>" into the pool key. If
+          # the pool clusters are created with a different zone set than the PR
+          # jobs search for, the pool key never matches, every PR leg creates a
+          # brand-new (NAT-gateway-consuming) cluster instead of claiming a
+          # pooled one, and the region eventually hits its NAT gateway quota.
+          # Consumer derivation (keep in sync): ZONE_1 = <region>a for us-west-1
+          # (us-west-1b rejects subnets), else <region>b; ZONE_2 = <region>c.
           cat > /tmp/expand-addons.jq << 'EOF'
+          def zones: (if .region == "us-west-1" then .region + "a" else .region + "b" end) + " " + .region + "c";
           {
             "include": [
               # all-addons configuration from aws-cni versions
               (.aws_cni.include[] | . + {
                 "addons": "coredns kube-proxy vpc-cni",
-                "addons_name": "all-addons"
+                "addons_name": "all-addons",
+                "zones": (. | zones),
+                "az_cluster": (if .region == "us-west-1" then .region + "a" else .region + "b" end),
+                "az_external": (.region + "c")
               }),
               # coredns-kubeproxy configuration from eks versions
               (.eks.include[] | . + {
                 "addons": "coredns kube-proxy",
-                "addons_name": "coredns-kubeproxy"
+                "addons_name": "coredns-kubeproxy",
+                "zones": (. | zones),
+                "az_cluster": (if .region == "us-west-1" then .region + "a" else .region + "b" end),
+                "az_external": (.region + "c")
               })
             ]
           }
@@ -309,7 +326,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
@@ -376,18 +393,18 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install eksctl CLI
         run: |
-          curl -LO "https://github.com/eksctl-io/eksctl/releases/download/${{ env.eksctl_version }}/eksctl_$(uname -s)_amd64.tar.gz"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 3 -O "https://github.com/eksctl-io/eksctl/releases/download/${{ env.eksctl_version }}/eksctl_$(uname -s)_amd64.tar.gz"
           sudo tar -xzvf "eksctl_$(uname -s)_amd64.tar.gz" -C /usr/bin
           rm "eksctl_$(uname -s)_amd64.tar.gz"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
@@ -510,6 +527,9 @@ jobs:
           owner: "eks-cluster-pool-manager"
           version: ${{ matrix.version }}
           spot: false
+          nodes_without_cilium: 2
+          az_cluster: ${{ matrix.az_cluster }}
+          az_external: ${{ matrix.az_external }}
 
       - name: Upload kubeconfig to S3 pool
         if: ${{ steps.check-pool.outputs.should_create == 'true' }}
@@ -629,7 +649,7 @@ jobs:
       matrix: ${{ fromJson(needs.generate-cleanup-matrix.outputs.matrix) }}
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}

@@ -8,12 +8,10 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v10"
 	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/require"
 
-	// Required so SetID() resolves the Azure resource-ID parser.
-	_ "github.com/cilium/cilium/pkg/azure/types/azureid"
 	iputil "github.com/cilium/cilium/pkg/ip"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 )
@@ -156,16 +154,15 @@ func TestParseInterface(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, got := parseInterface(hivetest.Logger(t), tt.iface, tt.subnets, tt.usePrimary)
 			require.NotNil(t, got)
+			require.Equal(t, ifaceID, got.ID)
 			require.Equal(t, tt.expectedIP, got.IP)
 			require.Equal(t, tt.expectedSubnetID, got.Subnet.ID)
 			require.Equal(t, tt.expectedCIDR, got.Subnet.CIDR)
-			require.Equal(t, tt.expectedCIDR, got.CIDR) //nolint:staticcheck // verifies the deprecated mirror still tracks Subnet.CIDR
 			require.Equal(t, tt.expectedGateway, got.Gateway)
 
 			gotAddrs := make([]iputil.Addr, 0, len(got.Addresses))
 			for _, a := range got.Addresses {
 				gotAddrs = append(gotAddrs, a.IP)
-				require.Equal(t, tt.expectedSubnetID, a.Subnet) //nolint:staticcheck // exercises the deprecated mirror
 			}
 			if tt.expectedAddrs == nil {
 				require.Empty(t, gotAddrs)

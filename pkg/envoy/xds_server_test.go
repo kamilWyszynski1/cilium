@@ -35,7 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/policy/types"
 	policyTypes "github.com/cilium/cilium/pkg/policy/types"
-	"github.com/cilium/cilium/pkg/spanstat"
+	syncnames "github.com/cilium/cilium/pkg/secretsync/names"
 	testpolicy "github.com/cilium/cilium/pkg/testutils/policy"
 	ciliumTypes "github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
@@ -91,19 +91,11 @@ func newProxyUpdaterMock(t testing.TB, namedPort uint16) *test.ProxyUpdaterMock 
 	return &test.ProxyUpdaterMock{Id: 1000, Ipv4: "10.0.0.1", Ipv6: "f00d::1", NamedPort: namedPort}
 }
 
-type dummyPolicyStats struct {
-	waitingForPolicyRepository spanstat.SpanStat
-}
-
 type noopXDSMetrics struct{}
 
 func (noopXDSMetrics) IncreaseNACK(string)   {}
 func (noopXDSMetrics) IncreaseACK(string)    {}
 func (noopXDSMetrics) IncreaseCancel(string) {}
-
-func (s *dummyPolicyStats) WaitingForPolicyRepository() *spanstat.SpanStat {
-	return &s.waitingForPolicyRepository
-}
 
 var PortRuleHTTP1 = &api.PortRuleHTTP{
 	Path:    "/foo",
@@ -1466,6 +1458,7 @@ func TestCNPWildcardPortListenerRedirectToEnvoy(t *testing.T) {
 		idMgr,
 		testpolicy.NewPolicyMetricsNoop(),
 	)
+	idMgr.Subscribe(testpolicy.SelectorCacheObserver{Cache: repo.GetSubjectSelectorCache()})
 	idMgr.Add(localIdentity)
 	t.Cleanup(func() {
 		idMgr.Remove(localIdentity)
@@ -1495,8 +1488,9 @@ func TestCNPWildcardPortListenerRedirectToEnvoy(t *testing.T) {
 	require.NoError(t, cnpRule.Sanitize())
 	repo.MustAddList(api.Rules{cnpRule})
 
-	selPolicy, _, err := repo.GetSelectorPolicy(localIdentity, 0, &dummyPolicyStats{}, ep.GetID())
+	selPolicy, _, err := repo.ComputeSelectorPolicy(localIdentity)
 	require.NoError(t, err)
+	t.Cleanup(func() { selPolicy.Supersede() })
 
 	const listenerProxyPort = uint16(19001)
 	const qualifiedListener = "default/test-cec/listener1"
@@ -1728,11 +1722,11 @@ func newEgressPortNetworkPolicyReturnVal(tls *cilium.TLSContext) []*cilium.PortN
 }
 
 var ciliumTLSContextOnlyValidatingSDSDetails = &cilium.TLSContext{
-	ValidationContextSdsSecret: "cilium-secrets/testnamespace-testsecret",
+	ValidationContextSdsSecret: syncnames.SyncedSDSSecretName("cilium-secrets", k8sTypes.NamespacedName{Namespace: "testnamespace", Name: "testsecret"}),
 }
 
 var ciliumTLSContextOnlySDSDetails = &cilium.TLSContext{
-	TlsSdsSecret: "cilium-secrets/testnamespace-testsecret",
+	TlsSdsSecret: syncnames.SyncedSDSSecretName("cilium-secrets", k8sTypes.NamespacedName{Namespace: "testnamespace", Name: "testsecret"}),
 }
 
 var ciliumTLSContextOnlyTrustedCa = &cilium.TLSContext{
@@ -1879,10 +1873,10 @@ var ExpectedPerPortPoliciesBothWaysTLSSDS = []*cilium.PortNetworkPolicy{
 			Precedence:     uint32(policyTypes.MaxAllowPrecedence + 1),
 			RemotePolicies: []uint32{1001, 1002},
 			DownstreamTlsContext: &cilium.TLSContext{
-				TlsSdsSecret: "cilium-secrets/tlsns-terminating-tls",
+				TlsSdsSecret: syncnames.SyncedSDSSecretName("cilium-secrets", k8sTypes.NamespacedName{Namespace: "tlsns", Name: "terminating-tls"}),
 			},
 			UpstreamTlsContext: &cilium.TLSContext{
-				ValidationContextSdsSecret: "cilium-secrets/tlsns-originating-tls",
+				ValidationContextSdsSecret: syncnames.SyncedSDSSecretName("cilium-secrets", k8sTypes.NamespacedName{Namespace: "tlsns", Name: "originating-tls"}),
 			},
 		}},
 	},
@@ -2476,19 +2470,16 @@ func testXdsServer(t *testing.T) *xdsServer {
 	}
 }
 
-func (s *xdsServer) GetNetworkPolicies(resourceNames []string) (map[string]*cilium.NetworkPolicy, error) {
-	resources, err := s.networkPolicyCache.GetResources(NetworkPolicyTypeURL, 0, "", resourceNames)
-	if err != nil {
-		return nil, err
-	}
-	networkPolicies := make(map[string]*cilium.NetworkPolicy, len(resources.Resources))
-	for _, res := range resources.Resources {
-		networkPolicy := res.(*cilium.NetworkPolicy)
+func (s *xdsServer) GetNetworkPolicies(resourceNames []string) map[string]*cilium.NetworkPolicy {
+	resources := s.networkPolicyCache.GetResources(NetworkPolicyTypeURL, 0, resourceNames)
+	networkPolicies := make(map[string]*cilium.NetworkPolicy, len(resources.VersionedResources))
+	for i := range resources.VersionedResources {
+		networkPolicy := resources.VersionedResources[i].Resource.(*cilium.NetworkPolicy)
 		for _, ip := range networkPolicy.EndpointIps {
 			networkPolicies[ip] = networkPolicy
 		}
 	}
-	return networkPolicies, nil
+	return networkPolicies
 }
 
 func TestUpdateNetworkPolicyRevertKeepsLocalEndpointStoreAfterStaleDuplicateRemoval(t *testing.T) {
@@ -2545,8 +2536,7 @@ func TestUpdateNetworkPolicyRevertKeepsLocalEndpointStoreAfterStaleDuplicateRemo
 	require.Equal(t, currentEP.GetID(), localEP.GetID())
 	require.Nil(t, xds.localEndpointStore.getLocalEndpoint(staleEP.Ipv6))
 
-	stalePolicy, err := xds.networkPolicyCache.Lookup(NetworkPolicyTypeURL, staleResourceName)
-	require.NoError(t, err)
+	stalePolicy := xds.networkPolicyCache.Lookup(NetworkPolicyTypeURL, staleResourceName)
 	require.Nil(t, stalePolicy)
 }
 
@@ -2572,9 +2562,8 @@ func TestUpdateNetworkPolicyLegacyACKUsesNodeIP(t *testing.T) {
 	acker, ok := xdsServer.networkPolicyMutator.(*xds.AckingResourceMutatorWrapper)
 	require.True(t, ok)
 	resourceName := strconv.FormatUint(currentEP.GetID(), 10)
-	resources, err := xdsServer.networkPolicyCache.GetResources(NetworkPolicyTypeURL, 0, "127.0.0.1", nil)
-	require.NoError(t, err)
-	acker.HandleResourceVersionAck(resources.Version, resources.Version, "127.0.0.1", []string{resourceName}, NetworkPolicyTypeURL, "")
+	resources := xdsServer.networkPolicyCache.GetResources(NetworkPolicyTypeURL, 0, nil)
+	acker.HandleResourceVersionAck("127.0.0.1", resources.Version, resources.Version, false, "", NetworkPolicyTypeURL, []string{resourceName})
 
 	require.NoError(t, wg.Wait())
 	finalize()
@@ -2597,6 +2586,7 @@ func newTestEndpointPolicy(t *testing.T, ep *listenerProxyUpdaterMock) (*policy.
 		idMgr,
 		testpolicy.NewPolicyMetricsNoop(),
 	)
+	idMgr.Subscribe(testpolicy.SelectorCacheObserver{Cache: repo.GetSubjectSelectorCache()})
 	idMgr.Add(localIdentity)
 	t.Cleanup(func() {
 		idMgr.Remove(localIdentity)
@@ -2618,8 +2608,9 @@ func newTestEndpointPolicy(t *testing.T, ep *listenerProxyUpdaterMock) (*policy.
 
 func distillEndpointPolicy(t *testing.T, repo *policy.Repository, localIdentity *identity.Identity, ep *listenerProxyUpdaterMock) *policy.EndpointPolicy {
 	logger := hivetest.Logger(t)
-	selPolicy, _, err := repo.GetSelectorPolicy(localIdentity, 0, &dummyPolicyStats{}, ep.GetID())
+	selPolicy, _, err := repo.ComputeSelectorPolicy(localIdentity)
 	require.NoError(t, err)
+	t.Cleanup(func() { selPolicy.Supersede() })
 
 	epp := selPolicy.DistillPolicy(logger, ep, nil)
 	t.Cleanup(func() {

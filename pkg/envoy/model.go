@@ -6,7 +6,6 @@ package envoy
 import (
 	"context"
 	"errors"
-	"fmt"
 	"iter"
 	"log/slog"
 	"slices"
@@ -27,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/envoy/config"
 	envoypolicy "github.com/cilium/cilium/pkg/envoy/policy"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -35,6 +35,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	policyTypes "github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/proxy/endpoint"
+	syncnames "github.com/cilium/cilium/pkg/secretsync/names"
 	ciliumTypes "github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
@@ -157,7 +158,7 @@ func GetLocalListenerAddresses(port uint16, ipv4, ipv6 bool) (*envoy_config_core
 	}, additionalAddress
 }
 
-func GetListenerFilter(isIngress bool, useOriginalSourceAddr bool, proxyPort uint16, lingerConfig int) *envoy_config_listener.ListenerFilter {
+func GetListenerFilter(isIngress bool, useOriginalSourceAddr bool, proxyPort uint16, lingerConfig int, serverConfig *xdsServerConfig) *envoy_config_listener.ListenerFilter {
 	conf := &cilium.BpfMetadata{
 		IsIngress:                isIngress,
 		UseOriginalSourceAddress: useOriginalSourceAddr,
@@ -165,13 +166,11 @@ func GetListenerFilter(isIngress bool, useOriginalSourceAddr bool, proxyPort uin
 		IsL7Lb:                   false,
 		ProxyId:                  uint32(proxyPort),
 		IpcacheName:              ipcache.Name,
+		UseNphds:                 serverConfig.useNPHDS,
 	}
 
-	if ADSModeEnabled() {
-		// Keep NPHDS disabled in production. Envoy can resolve identities from
-		// ipcache/BPF maps, while standalone Envoy tests enable NPHDS explicitly
-		// for environments without datapath maps.
-		conf.CiliumConfigSource = NewCiliumXdsWithAdsConfigSource()
+	if serverConfig.envoyXDSMode != config.EnvoyXDSModeSplit {
+		conf.CiliumConfigSource = CiliumConfigSource(serverConfig.envoyXDSMode)
 	}
 
 	if lingerConfig >= 0 {
@@ -285,10 +284,7 @@ func toEnvoyTerminatingTLSContext(tls *policy.TLSContext, policySecretsNamespace
 }
 
 func namespacedNametoSyncedSDSSecretName(namespacedName types.NamespacedName, policySecretsNamespace string) string {
-	if policySecretsNamespace == "" {
-		return fmt.Sprintf("%s/%s", namespacedName.Namespace, namespacedName.Name)
-	}
-	return fmt.Sprintf("%s/%s-%s", policySecretsNamespace, namespacedName.Namespace, namespacedName.Name)
+	return syncnames.SyncedSDSSecretName(policySecretsNamespace, namespacedName)
 }
 
 // return the Envoy proxy node IDs that need to ACK the policy.

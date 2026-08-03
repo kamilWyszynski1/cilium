@@ -50,7 +50,6 @@ const (
 	CiliumCTAny4Global                  = "cilium_ct_any4_global"
 	CiliumCTAny6Global                  = "cilium_ct_any6_global"
 	CiliumDevices                       = "cilium_devices"
-	CiliumEgressGWPolicyV4              = "cilium_egress_gw_policy_v4"
 	CiliumEgressGWPolicyV4V2            = "cilium_egress_gw_policy_v4_v2"
 	CiliumEgressGWPolicyV6              = "cilium_egress_gw_policy_v6"
 	CiliumEgresscallPolicy              = "cilium_egresscall_policy"
@@ -103,7 +102,7 @@ const (
 	CiliumPerClusterSNATV6External      = "cilium_per_cluster_snat_v6_external"
 	CiliumPerClusterSNATV6ExternalInner = "cilium_per_cluster_snat_v6_external_inner"
 	CiliumPerCPUTraceID                 = "cilium_percpu_trace_id"
-	CiliumPolicyV2                      = "cilium_policy_v2"
+	CiliumPolicy                        = "cilium_policy"
 	CiliumPolicystats                   = "cilium_policystats"
 	CiliumRatelimit                     = "cilium_ratelimit"
 	CiliumRatelimitMetrics              = "cilium_ratelimit_metrics"
@@ -287,20 +286,6 @@ func newCiliumDevicesSpec(btf *btf.Spec) *ebpf.MapSpec {
 		Value:      anyTypeByName(btf, "device_state"),
 		MaxEntries: 512,
 		Flags:      unix.BPF_F_NO_PREALLOC,
-		Pinning:    ebpf.PinByName,
-	}
-}
-
-func newCiliumEgressGWPolicyV4Spec(btf *btf.Spec) *ebpf.MapSpec {
-	return &ebpf.MapSpec{
-		Name:       CiliumEgressGWPolicyV4,
-		Type:       ebpf.LPMTrie,
-		KeySize:    12,
-		Key:        anyTypeByName(btf, "egress_gw_policy_key"),
-		ValueSize:  8,
-		Value:      anyTypeByName(btf, "egress_gw_policy_entry"),
-		MaxEntries: 16384,
-		Flags:      unix.BPF_F_NO_PREALLOC | unix.BPF_F_RDONLY_PROG,
 		Pinning:    ebpf.PinByName,
 	}
 }
@@ -1034,9 +1019,9 @@ func newCiliumPerCPUTraceIDSpec(btf *btf.Spec) *ebpf.MapSpec {
 	}
 }
 
-func newCiliumPolicyV2Spec(btf *btf.Spec) *ebpf.MapSpec {
+func newCiliumPolicySpec(btf *btf.Spec) *ebpf.MapSpec {
 	return &ebpf.MapSpec{
-		Name:       CiliumPolicyV2,
+		Name:       CiliumPolicy,
 		Type:       ebpf.LPMTrie,
 		KeySize:    12,
 		Key:        anyTypeByName(btf, "policy_key"),
@@ -1323,7 +1308,6 @@ var _outer []newMapFn = []newMapFn{
 	newCiliumCTAny4GlobalSpec,
 	newCiliumCTAny6GlobalSpec,
 	newCiliumDevicesSpec,
-	newCiliumEgressGWPolicyV4Spec,
 	newCiliumEgressGWPolicyV4V2Spec,
 	newCiliumEgressGWPolicyV6Spec,
 	newCiliumEgresscallPolicySpec,
@@ -1367,7 +1351,7 @@ var _outer []newMapFn = []newMapFn{
 	newCiliumPerClusterSNATV4ExternalSpec,
 	newCiliumPerClusterSNATV6ExternalSpec,
 	newCiliumPerCPUTraceIDSpec,
-	newCiliumPolicyV2Spec,
+	newCiliumPolicySpec,
 	newCiliumPolicystatsSpec,
 	newCiliumRatelimitSpec,
 	newCiliumRatelimitMetricsSpec,

@@ -60,9 +60,9 @@ concurrency:
 env:
   clusterNamePrefix: ${{ github.repository_owner }}-${{ github.event.repository.name }}-${{ github.run_id }}-${{ github.run_attempt }}
   # renovate: datasource=github-releases depName=eksctl-io/eksctl
-  eksctl_version: v0.228.0
+  eksctl_version: v0.229.0
   # renovate: datasource=github-releases depName=kubernetes/kubernetes
-  kubectl_version: v1.36.2
+  kubectl_version: v1.36.3
 
 jobs:
   echo-inputs:
@@ -91,7 +91,7 @@ jobs:
       empty: ${{ steps.set-matrix.outputs.empty }}
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -124,7 +124,7 @@ jobs:
           cat /tmp/matrix.json
 
       - name: Set up AWS CLI credentials
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: us-west-1
@@ -155,7 +155,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -167,6 +167,7 @@ jobs:
           login-host: ${{ vars.DOCKER_READ_HOST }}
           login-username: ${{ vars.DOCKER_READ_USERNAME }}
           login-password: ${{ secrets.DOCKER_READ_PASSWORD }}
+          auth-required: ${{ vars.DOCKER_AUTH_REQUIRED }}
 
   installation-and-connectivity:
     permissions:
@@ -203,7 +204,7 @@ jobs:
           comment_on_pr: false
 
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.context-ref || github.sha }}
           persist-credentials: false
@@ -220,14 +221,6 @@ jobs:
           registry_organization: ${{ vars.DOCKER_READ_ORG }}
           chart-dir: ./untrusted/install/kubernetes/cilium
           image-pull-secret: "cilium-registry"
-
-      - name: Get connectivity test flags
-        id: e2e_config
-        uses: ./.github/actions/cli-test-config
-        with:
-          external-target: 'amazon.com.'
-          hubble: false
-          test-concurrency: 3
 
       - name: Get PR base branch
         id: get-base-branch
@@ -277,7 +270,6 @@ jobs:
             --helm-set=cni.chainingMode=aws-cni \
             --helm-set=eni.enabled=false \
             --helm-set=ipam.mode=cluster-pool \
-            --helm-set=enable-l7-proxy=false \
             --helm-set=routingMode=native \
             --helm-set=bandwidthManager.enabled=false \
             --helm-set=extraArgs={--enable-identity-mark=false} \
@@ -289,34 +281,43 @@ jobs:
                                       --helm-set=cni.enableRouteMTUForCNIChaining=true"
           fi
 
-          CONNECTIVITY_TEST_DEFAULTS="${{ steps.e2e_config.outputs.test_flags }}"
-
           # shellcheck disable=SC2046
           echo cluster_name=${CLUSTER_NAME} >> $GITHUB_OUTPUT
           # shellcheck disable=SC2046
           echo cilium_install_defaults=${CILIUM_INSTALL_DEFAULTS} >> $GITHUB_OUTPUT
-          # shellcheck disable=SC2046
-          echo connectivity_test_defaults=${CONNECTIVITY_TEST_DEFAULTS} >> $GITHUB_OUTPUT
           echo sha=${{ steps.default_vars.outputs.sha }} >> $GITHUB_OUTPUT
           # shellcheck disable=SC2046
           echo owner=${OWNER} >> $GITHUB_OUTPUT
 
+          # us-west-1 only exposes two usable availability zones for subnet
+          # creation (us-west-1a and us-west-1c); us-west-1b rejects subnets.
+          case "${{ matrix.region }}" in
+          us-west-1)
+            ZONE_1=${{ matrix.region }}a
+            ;;
+          *)
+            ZONE_1=${{ matrix.region }}b
+            ;;
+          esac
+          echo eks_zone_1=${ZONE_1} >> $GITHUB_OUTPUT
+          echo eks_zone_2=${{ matrix.region }}c >> $GITHUB_OUTPUT
+
       - name: Install kubectl
         run: |
-          curl -sLO "https://dl.k8s.io/release/${{ env.kubectl_version }}/bin/linux/amd64/kubectl"
-          curl -sLO "https://dl.k8s.io/${{ env.kubectl_version }}/bin/linux/amd64/kubectl.sha256"
+          curl -sfL --retry 5 --retry-all-errors --retry-delay 3 -O "https://dl.k8s.io/release/${{ env.kubectl_version }}/bin/linux/amd64/kubectl"
+          curl -sfL --retry 5 --retry-all-errors --retry-delay 3 -O "https://dl.k8s.io/${{ env.kubectl_version }}/bin/linux/amd64/kubectl.sha256"
           echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
           kubectl version --client
 
       - name: Install eksctl CLI
         run: |
-          curl -LO "https://github.com/eksctl-io/eksctl/releases/download/${{ env.eksctl_version }}/eksctl_$(uname -s)_amd64.tar.gz"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 3 -O "https://github.com/eksctl-io/eksctl/releases/download/${{ env.eksctl_version }}/eksctl_$(uname -s)_amd64.tar.gz"
           sudo tar -xzvf "eksctl_$(uname -s)_amd64.tar.gz" -C /usr/bin
           rm "eksctl_$(uname -s)_amd64.tar.gz"
 
       - name: Set up AWS CLI credentials
-        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
@@ -327,6 +328,7 @@ jobs:
         with:
           cluster_name: ${{ steps.vars.outputs.cluster_name }}
           region: ${{ matrix.region }}
+          zones: "${{ steps.vars.outputs.eks_zone_1 }} ${{ steps.vars.outputs.eks_zone_2 }}"
           owner: "${{ steps.vars.outputs.owner }}"
           version: ${{ matrix.version }}
           addons: "coredns kube-proxy vpc-cni"
@@ -340,6 +342,9 @@ jobs:
           owner: "${{ steps.vars.outputs.owner }}"
           version: ${{ matrix.version }}
           spot: false
+          nodes_without_cilium: 2
+          az_cluster: ${{ steps.vars.outputs.eks_zone_1 }}
+          az_external: ${{ steps.vars.outputs.eks_zone_2 }}
 
       - name: Generate cilium-cli kubeconfig
         id: gen-kubeconfig
@@ -348,6 +353,7 @@ jobs:
           kubeconfig: "~/.kube/config"
 
       - name: Create imagePullSecret
+        if: ${{ vars.DOCKER_AUTH_REQUIRED == 'true' }}
         run: |
           kubectl create secret docker-registry cilium-registry \
             --namespace kube-system \
@@ -356,7 +362,7 @@ jobs:
             --docker-password="${{ secrets.DOCKER_READ_PASSWORD }}"
 
       - name: Install Cilium CLI
-        uses: cilium/cilium-cli@e391e739db83a8b888ecf18786af6853c51a0c58 # v0.19.5
+        uses: cilium/cilium-cli@7ca7fc53c20275f5c10ef5f3557076691fd1d720 # v0.19.7
         with:
           skip-build: ${{ env.CILIUM_CLI_SKIP_BUILD }}
           image-repo: ${{ env.CILIUM_CLI_IMAGE_REPO }}
@@ -368,23 +374,86 @@ jobs:
       # Warning: since this is a privileged workflow, subsequent workflow job
       # steps must take care not to execute untrusted code.
       - name: Checkout pull request branch (NOT TRUSTED)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.vars.outputs.sha }}
           persist-credentials: false
+          # Required by checkout v7+ to fetch fork PR code; see the NOT TRUSTED warning above.
+          allow-unsafe-pr-checkout: true
           path: untrusted
           sparse-checkout: |
             install/kubernetes/cilium
 
+      - name: Determine the native routing CIDR
+        id: native_cidr
+        run: |
+          # Retrieve the CIDR associated with the availability zone where the cluster
+          # is deployed, and configure it as native routing CIDR. Otherwise, Cilium
+          # would default to the VPC CIDR, but we want to masquerade traffic towards
+          # the external destination (which is located in the same VPC, but different
+          # availability zone), to reflect the most common type of real deployments.
+          NATIVE_CIDR=$(aws ec2 describe-subnets --region ${{ matrix.region }} \
+            --filters Name=availability-zone,Values=${{ steps.vars.outputs.eks_zone_1 }} \
+                Name=tag:alpha.eksctl.io/cluster-name,Values=${{ steps.vars.outputs.cluster_name }} \
+                Name=map-public-ip-on-launch,Values=false \
+            --query 'Subnets[*].CidrBlock' --output text)
+          echo "ipv4_native_cidr=$NATIVE_CIDR" >> $GITHUB_OUTPUT
+          echo "Native routing CIDR: $NATIVE_CIDR"
+
       - name: Install Cilium
         id: install-cilium
         run: |
-          cilium install ${{ steps.vars.outputs.cilium_install_defaults }}
+          cilium install ${{ steps.vars.outputs.cilium_install_defaults }} \
+          --nodes-without-cilium \
+          --set=ipv4NativeRoutingCIDR="${{ steps.native_cidr.outputs.ipv4_native_cidr }}"
 
       - name: Wait for Cilium to be ready
         run: |
           cilium status --wait --interactive=false --wait-duration=10m
           kubectl get pods -n kube-system
+
+      - name: Add external targets to the cluster
+        uses: ./.github/actions/generic-external-targets
+        id: external_targets
+
+      - name: Determine the CIDR of fake external targets
+        id: external_cidr
+        run: |
+          SUBNETS=$(aws eks describe-nodegroup \
+            --cluster-name ${{ steps.setup-cluster.outputs.cluster_name }} \
+            --nodegroup-name ng-amd64-external \
+            --query 'nodegroup.subnets' \
+            --output text)
+          CIDRS=$(aws ec2 describe-subnets \
+            --subnet-ids $SUBNETS \
+            --query 'Subnets[].CidrBlock' \
+            --output text)
+          # Supposed to be one subnet and one CIDR with the default setup-eks-nodegroup config.
+          CIDRV4=$(echo "$CIDRS" | awk '{print $1}')
+          echo "ipv4_external_cidr=$CIDRV4" >> $GITHUB_OUTPUT
+
+      - name: Get connectivity test flags
+        id: e2e_config
+        uses: ./.github/actions/cli-test-config
+        with:
+          external-target: ${{ steps.external_targets.outputs.external_target_name }}
+          external-other-target: ${{ steps.external_targets.outputs.other_external_target_name }}
+          external-cidr: ${{ steps.external_cidr.outputs.ipv4_external_cidr }}
+          external-ip: ${{ steps.external_targets.outputs.ipv4_external_target }}
+          external-other-ip: ${{ steps.external_targets.outputs.ipv4_other_external_target }}
+          external-target-ca-namespace: external-target-secrets
+          external-target-ca-name: custom-ca
+          external-target-fake-dns: true
+          hubble: false
+          test-concurrency: 3
+          tests: '!fqdn,!l7' # L7 policies are not supported in chaining mode.
+
+      - name: Set up job variables for connectivity tests
+        id: vars-conn
+        run: |
+          CONNECTIVITY_TEST_DEFAULTS="${{ steps.e2e_config.outputs.test_flags }}"
+
+          echo connectivity_test_defaults=${CONNECTIVITY_TEST_DEFAULTS} >> $GITHUB_OUTPUT
 
       - name: Check that AWS iptables chains have not been removed
         run: |
@@ -403,7 +472,7 @@ jobs:
       - name: Run connectivity test (${{ join(matrix.*, ', ') }})
         id: run-tests
         run: |
-          cilium connectivity test ${{ steps.vars.outputs.connectivity_test_defaults }} \
+          cilium connectivity test ${{ steps.vars-conn.outputs.connectivity_test_defaults }} \
           --junit-file "cilium-junits/${{ env.job_name }} (${{ join(matrix.*, ', ') }}).xml" \
           --junit-property github_job_step="Run connectivity test (${{ join(matrix.*, ', ') }})"
 

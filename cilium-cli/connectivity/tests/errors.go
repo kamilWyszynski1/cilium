@@ -45,6 +45,53 @@ func (r regexMatcher) IsMatch(log string) bool {
 	return r.MatchString(log)
 }
 
+// thresholdException tolerates a bad log message while it affects no more than
+// maxDistinct distinct values of the distinguishingField log field, used to
+// tell otherwise-equal message lines apart, and fails beyond that. seen tracks
+// the distinct values observed so far within a single pod's log stream.
+type thresholdException struct {
+	matcher             logMatcher
+	distinguishingField string
+	maxDistinct         int
+	seen                map[string]struct{}
+}
+
+// thresholdExceptions is the set of threshold exceptions in effect, carrying
+// their per-pod state. Create a fresh copy per pod with newTracker.
+type thresholdExceptions []thresholdException
+
+// newTracker returns a copy of the exceptions with empty per-pod state, ready
+// to record the messages of a single pod's log stream.
+func (tes thresholdExceptions) newTracker() thresholdExceptions {
+	tracker := make(thresholdExceptions, len(tes))
+	for i, te := range tes {
+		te.seen = make(map[string]struct{})
+		tracker[i] = te
+	}
+	return tracker
+}
+
+// recordFailure records an occurrence of a bad log message and reports whether
+// it should count as a failure. A message not governed by any threshold
+// exception always counts; a governed one counts only once it has been seen for
+// more than maxDistinct distinct values of its field.
+func (tes thresholdExceptions) recordFailure(justMsg, line string) bool {
+	for i := range tes {
+		te := &tes[i]
+		if !te.matcher.IsMatch(line) {
+			continue
+		}
+		value := extractValueFromLog(line, te.distinguishingField)
+		if value == "" {
+			// Missing field: key on the whole line so it can't collapse into one.
+			value = line
+		}
+		te.seen[value] = struct{}{}
+		return len(te.seen) > te.maxDistinct
+	}
+	return true
+}
+
 // NoErrorsInLogs checks whether there are no error messages in cilium-agent
 // logs. The error messages are defined in badLogMsgsWithExceptions, which key
 // is an error message, while values is a list of ignored messages.
@@ -53,8 +100,9 @@ func NoErrorsInLogs(ciliumVersion semver.Version, checkLevels []string, extraExc
 	// error cannot be fixed in Cilium or in the test.
 	errorLogExceptions := []logMatcher{
 		stringMatcher("Error in delegate stream, restarting"),
-		failedToUpdateLock, failedToReleaseLock,
-		failedToListCRDs, knownIssueWireguardCollision, nilDetailsForService, gobgpFailedCloseTCP}
+		failedToUpdateLock, failedToReleaseLock, failedToRetrieveLock, leaderElectionReadTimeout,
+		failedToListCRDs, knownIssueWireguardCollision, nilDetailsForService, gobgpFailedCloseTCP,
+		vendoredLeaderElectionLeaseLockError}
 
 	envoyExternalTargetTLSWarning := regexMatcher{regexp.MustCompile(fmt.Sprintf(envoyTLSWarningTemplate, externalTarget))}
 	envoyExternalOtherTargetTLSWarning := regexMatcher{regexp.MustCompile(fmt.Sprintf(envoyTLSWarningTemplate, externalOtherTarget))}
@@ -71,6 +119,12 @@ func NoErrorsInLogs(ciliumVersion semver.Version, checkLevels []string, extraExc
 		envoyExternalTargetTLSWarning, envoyExternalOtherTargetTLSWarning,
 		hubbleUIEnvVarFallback, k8sClientNetworkStatusError, bgpAlphaResourceDeprecation, ccgAlphaResourceDeprecation,
 		k8sEndpointDeprecatedWarn, proxylibDeprecatedWarn, certloaderInitialLoadWarn, localKeyAlreadyAllocated}
+
+	warningThresholdExceptions := thresholdExceptions{
+		// Benign for one node at ENI capacity, a real IP-starvation signal for
+		// several. cf. https://github.com/cilium/cilium/issues/42092
+		{matcher: instanceOutOfInterfaces, distinguishingField: "name", maxDistinct: 1},
+	}
 
 	if ciliumVersion.LT(semver.MustParse("1.18.0")) {
 		errorLogExceptions = append(errorLogExceptions, linkNotFound, removeInexistentID)
@@ -109,6 +163,7 @@ func NoErrorsInLogs(ciliumVersion semver.Version, checkLevels []string, extraExc
 	}
 	return &noErrorsInLogs{
 		errorMsgsWithExceptions: errorMsgsWithExceptions,
+		thresholdExceptions:     warningThresholdExceptions,
 		ScenarioBase:            check.NewScenarioBase(),
 		ciliumVersion:           ciliumVersion,
 		startTime:               startTime,
@@ -119,6 +174,7 @@ type noErrorsInLogs struct {
 	check.ScenarioBase
 
 	errorMsgsWithExceptions map[string][]logMatcher
+	thresholdExceptions     thresholdExceptions
 	ciliumVersion           semver.Version
 	mostCommonFailureLog    string
 	mostCommonFailureCount  int
@@ -342,6 +398,8 @@ func (n *noErrorsInLogs) podContainers(pod *corev1.Pod) podContainers {
 func (n *noErrorsInLogs) findUniqueFailures(logs []byte) (map[string]int, map[string]string) {
 	uniqueFailures := make(map[string]int)
 	exampleLogLine := make(map[string]string)
+	// Per-pod threshold state, reset for each pod's log stream.
+	thresholdExceptions := n.thresholdExceptions.newTracker()
 	for chunk := range bytes.SplitSeq(logs, []byte("\n")) {
 		msg := string(chunk)
 		for fail, ignoreMsgs := range n.errorMsgsWithExceptions {
@@ -359,8 +417,10 @@ func (n *noErrorsInLogs) findUniqueFailures(logs []byte) (map[string]int, map[st
 						// Matching didn't work, fallback to previous behaviour
 						justMsg = msg
 					}
-					count := uniqueFailures[justMsg]
-					uniqueFailures[justMsg] = count + 1
+					if !thresholdExceptions.recordFailure(justMsg, msg) {
+						continue
+					}
+					uniqueFailures[justMsg]++
 					exampleLogLine[justMsg] = msg
 				}
 			}
@@ -453,6 +513,7 @@ const (
 	failedToListCRDs     stringMatcher = "the server could not find the requested resource" // cf. https://github.com/cilium/cilium/issues/16425
 	failedToUpdateLock   stringMatcher = "Failed to update lock:"
 	failedToReleaseLock  stringMatcher = "Failed to release lock:"
+	failedToRetrieveLock stringMatcher = "Error retrieving lease lock"                          // cf. https://github.com/cilium/cilium/issues/45426
 	nilDetailsForService stringMatcher = "retrieved nil details for Service"                    // from: https://github.com/cilium/cilium/issues/35595
 	removeInexistentID   stringMatcher = "removing identity not added to the identity manager!" // from https://github.com/cilium/cilium/issues/16419
 	gobgpFailedCloseTCP  stringMatcher = "failed to close existing tcp connection"              // Benign error during BGP peer teardown in ACTIVE state
@@ -499,6 +560,7 @@ const (
 
 	k8sEndpointDeprecatedWarn stringMatcher = "v1 Endpoints is deprecated in v1.33+; use discovery.k8s.io/v1 EndpointSlice" // cf. https://github.com/cilium/cilium/issues/39105
 	proxylibDeprecatedWarn    stringMatcher = "The support for Envoy Go Extensions (proxylib) has been deprecated"          // cf. https://github.com/cilium/cilium/issues/38224
+	instanceOutOfInterfaces   stringMatcher = "Instance is out of interfaces"                                               // AWS ENI-at-capacity; benign for one node, fails if several nodes hit it. cf. https://github.com/cilium/cilium/issues/42092
 
 	certloaderInitialLoadWarn stringMatcher = certloader.InitialLoadWarn // Expected when certificates are not yet mounted.
 
@@ -513,6 +575,8 @@ var (
 	// while we fix this issue.
 	// TODO: Remove this after: #31535 has been fixed.
 	knownIssueWireguardCollision = regexMatcher{regexp.MustCompile("Cannot forward proxied DNS lookup.*:51871.*bind: address already in use")} // from: https://github.com/cilium/cilium/issues/30901
+	// This error originates from vendored client-go code and is retried by its leader election loop.
+	vendoredLeaderElectionLeaseLockError = regexMatcher{regexp.MustCompile(`vendor/k8s\.io/client-go/tools/leaderelection/leaderelection\.go:\d+.*msg="Error retrieving lease lock"`)}
 	// Cf. https://github.com/cilium/cilium/issues/35803
 	endpointMapDeleteFailed = regexMatcher{regexp.MustCompile(`Ignoring error while deleting endpoint.*from map cilium_\w+: delete: key does not exist`)}
 	// envoyTLSWarningTemplate is the legitimate warning log for negative TLS SNI test case
@@ -527,4 +591,6 @@ var (
 	gobgpFailedToSend = regexMatcher{regexp.MustCompile(`osrg/gobgp/v4/pkg/server.*msg="failed to send".*(use of closed network connection|broken pipe)`)}
 	// For https://github.com/cilium/cilium/issues/39370: Fixed only in cilium version >= 1.18
 	linkNotFound = regexMatcher{regexp.MustCompile(`retrieving device .+\: Link not found`)}
+	// Client-go counterpart of failedToRetrieveLock, scoped to the cancelled read. cf. https://github.com/cilium/cilium/issues/45426
+	leaderElectionReadTimeout = regexMatcher{regexp.MustCompile(`Unexpected error when reading response body.*request canceled \(Client\.Timeout or context cancellation while reading body\)`)}
 )

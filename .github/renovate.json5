@@ -50,6 +50,7 @@
     "cilium-cli/**",
     "pkg/azure/**",
     "images/**",
+    "examples/datapath-plugin/*",
     "examples/hubble/*",
     "go.mod",
     "go.sum",
@@ -93,6 +94,7 @@
   "pruneStaleBranches": true,
   "baseBranchPatterns": [
     "main",
+    "v1.20",
     "v1.19",
     "v1.18",
     "v1.17"
@@ -124,6 +126,15 @@
       // Dependency cooldown: skip versions published less than 5 days ago
       "matchUpdateTypes": ["major", "minor", "patch"],
       "minimumReleaseAge": "5 days"
+    },
+    {
+      // Docker Hub is the only Docker registry that currently supports release
+      // timestamps, causing updates to be never proposed by Renovate for all
+      // other registries. Hence, let's enable the "timestamp-optional" option,
+      // which unfortunately effectively disables the cooldown period for them.
+      // https://docs.renovatebot.com/key-concepts/minimum-release-age/#which-registries-support-release-timestamps
+      "matchDatasources": ["docker"],
+      "minimumReleaseAgeBehaviour": "timestamp-optional",
     },
     {
       // Do not pin or update digests for self-referenced cilium/cilium GitHub
@@ -267,6 +278,45 @@
       "matchFileNames": [
         "go.mod",
         "go.sum"
+      ],
+      // Separate major upgrades from minor/patch. Renovate does not support
+      // major upgrades of vendored Go modules: the 'gomodUpdateImportPaths'
+      // 'mod upgrade' step runs before 'go mod vendor' re-syncs
+      // vendor/modules.txt and fails with "inconsistent vendoring", which
+      // aborts the whole grouped artifact update and blocks every minor/patch
+      // update sharing the branch. Separating majors keeps this group flowing.
+      // With this set, a dependency that has both a minor and a major available
+      // still gets its minor update here (and its major in the group below).
+      // See https://github.com/renovatebot/renovate/issues/21010
+      "separateMajorMinor": true,
+      "postUpdateOptions": [
+        // update source import paths on major updates
+        "gomodUpdateImportPaths"
+      ],
+      "postUpgradeTasks": {
+        "commands": [
+          "go mod tidy",
+          "go mod vendor"
+        ],
+        "executionMode": "update"
+      },
+      "matchBaseBranches": [
+        "main"
+      ]
+    },
+    {
+      // Go module major upgrades, isolated into their own PR. These are expected
+      // to fail the automated artifact update for vendored modules (see the
+      // comment on the group above) and require manual intervention by
+      // maintainers, so they must not share a branch with the minor/patch group.
+      "groupName": "all go dependencies main (major)",
+      "groupSlug": "all-go-deps-major-main",
+      "matchFileNames": [
+        "go.mod",
+        "go.sum"
+      ],
+      "matchUpdateTypes": [
+        "major"
       ],
       "postUpdateOptions": [
         // update source import paths on major updates
@@ -473,6 +523,7 @@
       ],
       "allowedVersions": "24.04",
       "matchBaseBranches": [
+        "v1.20",
         "v1.19",
         "v1.18",
         "v1.17",
@@ -486,6 +537,7 @@
       ],
       "allowedVersions": "<1.26",
       "matchBaseBranches": [
+        "v1.20",
         "v1.19",
         "v1.18",
         "v1.17"
@@ -497,6 +549,7 @@
       ],
       "allowedVersions": "<3.24",
       "matchBaseBranches": [
+        "v1.20",
         "v1.19"
       ]
     },
@@ -874,6 +927,7 @@
       "versioning": "regex:v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<build>\\d+).*$",
       "allowedVersions": "/^v1\\.36\\.([0-9]+)-([0-9]+)-.*$/",
       "matchBaseBranches": [
+        "v1.20",
         "v1.19",
         "v1.18",
         "v1.17"

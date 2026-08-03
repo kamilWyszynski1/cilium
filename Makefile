@@ -401,6 +401,8 @@ generate-bpf: ## Generate config structs from BPF objects using dpgen and Go ske
 	@$(ECHO_DOCKER)
 	contrib/scripts/builder.sh \
 		$(MAKE_CONTAINER) -C /go/src/github.com/cilium/cilium/bpf generate V=$(V)
+	contrib/scripts/builder.sh \
+		$(MAKE_CONTAINER) -C /go/src/github.com/cilium/cilium/examples/datapath-plugin generate V=$(V)
 	@$(ECHO_CHECK) bpf-skel
 	$(QUIET)git status bpf/ pkg/ --porcelain
 
@@ -639,7 +641,7 @@ gateway-api-conformance-report: ## Run Gateway API conformance tests with a conf
 		--url github.com/cilium/cilium \
 		--version $(CILIUM_VERSION) \
 		--contact https://github.com/cilium/community/blob/main/roles/Maintainers.md \
-		--conformance-profiles GATEWAY-HTTP,GATEWAY-TLS,GATEWAY-GRPC,MESH-HTTP,MESH-GRPC \
+		--conformance-profiles GATEWAY-HTTP,GATEWAY-TLS,GATEWAY-GRPC,GATEWAY-TCP,GATEWAY-UDP,MESH-HTTP,MESH-GRPC \
 		--report-output=$(CURDIR)/gateway-api-conformance-report.yaml \
 	| $(GOTEST_FORMATTER)
 

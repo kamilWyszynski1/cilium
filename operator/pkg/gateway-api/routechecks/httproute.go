@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"regexp"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -43,18 +44,6 @@ func (h *HTTPRouteInput) SetParentCondition(ref gatewayv1.ParentReference, condi
 	})
 }
 
-func (h *HTTPRouteInput) SetAllParentCondition(condition metav1.Condition) {
-	// fill in the condition
-	condition.LastTransitionTime = metav1.NewTime(time.Now())
-	condition.ObservedGeneration = h.HTTPRoute.GetGeneration()
-
-	for _, parent := range h.HTTPRoute.Spec.ParentRefs {
-		h.mergeStatusConditions(parent, []metav1.Condition{
-			condition,
-		})
-	}
-}
-
 func (h *HTTPRouteInput) mergeStatusConditions(parentRef gatewayv1.ParentReference, updates []metav1.Condition) {
 	index := -1
 	for i, parent := range h.HTTPRoute.Status.RouteStatus.Parents {
@@ -83,7 +72,7 @@ func (h *HTTPRouteInput) GetNamespace() string {
 }
 
 func (h *HTTPRouteInput) GetGVK() schema.GroupVersionKind {
-	return gatewayv1.SchemeGroupVersion.WithKind("HTTPRoute")
+	return helpers.GatewayV1GVK("HTTPRoute")
 }
 
 func (h *HTTPRouteInput) GetRules() []GenericRule {
@@ -171,30 +160,81 @@ func (t *HTTPRouteRule) GetBackendRefs() []gatewayv1.BackendRef {
 		refs = append(refs, backend.BackendRef)
 	}
 	for _, f := range t.Rule.Filters {
-		if f.Type == gatewayv1.HTTPRouteFilterRequestMirror {
-			if f.RequestMirror == nil {
-				continue
-			}
+		switch {
+		case f.Type == gatewayv1.HTTPRouteFilterRequestMirror && f.RequestMirror != nil:
 			refs = append(refs, gatewayv1.BackendRef{
 				BackendObjectReference: f.RequestMirror.BackendRef,
+			})
+		case f.Type == gatewayv1.HTTPRouteFilterExternalAuth && f.ExternalAuth != nil:
+			refs = append(refs, gatewayv1.BackendRef{
+				BackendObjectReference: f.ExternalAuth.BackendRef,
 			})
 		}
 	}
 	return refs
 }
 
-// Validates the HTTPRoute header
-func (r *HTTPRouteInput) ValidateHeaderModifier() error {
+func invalidHeaderModifierCondition(headerName gatewayv1.HTTPHeaderName) metav1.Condition {
+	return metav1.Condition{
+		Type:    string(gatewayv1.RouteConditionAccepted),
+		Status:  metav1.ConditionFalse,
+		Reason:  string(gatewayv1.RouteReasonUnsupportedValue),
+		Message: fmt.Sprintf("Invalid HTTPRoute header modifier: %q header is not supported; use URLRewrite.hostname instead", headerName),
+	}
+}
+
+// Validates the HTTPRoute header modifiers.
+func (r *HTTPRouteInput) ValidateHeaderModifier() (metav1.Condition, bool) {
 	for _, backendref := range r.HTTPRoute.Spec.Rules {
 		for _, f := range backendref.Filters {
 			if f.Type == gatewayv1.HTTPRouteFilterRequestHeaderModifier {
 				for _, set := range f.RequestHeaderModifier.Set {
 					if set.Name == "Host" {
-						return fmt.Errorf("Invalid HTTPRoute header: %q", set.Name)
+						return invalidHeaderModifierCondition(set.Name), true
 					}
 				}
 			}
 		}
 	}
-	return nil
+	return metav1.Condition{}, false
+}
+
+func invalidRegexCondition(field string, err error) metav1.Condition {
+	return metav1.Condition{
+		Type:    string(gatewayv1.RouteConditionAccepted),
+		Status:  metav1.ConditionFalse,
+		Reason:  string(gatewayv1.RouteReasonUnsupportedValue),
+		Message: fmt.Sprintf("Invalid regular expression in %s match: %v", field, err),
+	}
+}
+
+func (h *HTTPRouteInput) ValidateMatchRegexps() (metav1.Condition, bool) {
+	for _, rule := range h.HTTPRoute.Spec.Rules {
+		for _, match := range rule.Matches {
+			if pathMatch := match.Path; pathMatch != nil && pathMatch.Type != nil &&
+				*pathMatch.Type == gatewayv1.PathMatchRegularExpression && pathMatch.Value != nil {
+				if _, err := regexp.Compile(*pathMatch.Value); err != nil {
+					return invalidRegexCondition("path", err), true
+				}
+			}
+
+			for _, headerMatch := range match.Headers {
+				if headerMatch.Type != nil && *headerMatch.Type == gatewayv1.HeaderMatchRegularExpression {
+					if _, err := regexp.Compile(headerMatch.Value); err != nil {
+						return invalidRegexCondition("header", err), true
+					}
+				}
+			}
+
+			for _, queryMatch := range match.QueryParams {
+				if queryMatch.Type != nil && *queryMatch.Type == gatewayv1.QueryParamMatchRegularExpression {
+					if _, err := regexp.Compile(queryMatch.Value); err != nil {
+						return invalidRegexCondition("queryParam", err), true
+					}
+				}
+			}
+		}
+	}
+
+	return metav1.Condition{}, false
 }

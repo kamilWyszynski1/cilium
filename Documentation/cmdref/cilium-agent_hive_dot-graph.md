@@ -100,6 +100,7 @@ cilium-agent hive dot-graph [flags]
       --enable-l2-pod-announcements                               Enable announcing Pod IPs with Gratuitous ARP and NDP
       --enable-lb-ipam                                            Enable LB IPAM (default true)
       --enable-monitor                                            Enable the monitor unix domain socket server (default true)
+      --enable-network-driver                                     enable network driver to assign interfaces via Dynamic Resource Allocation
       --enable-no-service-endpoints-routable                      Enable routes when service has 0 endpoints (default true)
       --enable-node-ipam                                          Enable Node IPAM
       --enable-policy-secrets-sync                                Enables Envoy secret sync for Secrets used in CiliumNetworkPolicy and CiliumClusterwideNetworkPolicy
@@ -134,7 +135,7 @@ cilium-agent hive dot-graph [flags]
       --envoy-node-locality-enabled                               Enable Envoy node-locality support for zone-aware routing
       --envoy-policy-restore-timeout duration                     Maximum time to wait for endpoint policy restoration before starting serving resources to Envoy (default 3m0s)
       --envoy-secrets-namespace string                            EnvoySecretsNamespace is the namespace having secrets used by CEC
-      --envoy-xds-mode string                                     xDS server implementation for Envoy proxy configuration. Valid values are "split" for the existing per-resource-type xDS server, "ads" for the ADS (Aggregated Discovery Service) xDS server, or "strict-ads" for ADS with strict snapshot cache behavior and generated snapshot consistency checks (default "split")
+      --envoy-xds-mode string                                     xDS server operating mode for Envoy proxy configuration. Valid values are "split" for the existing per-resource-type xDS, "delta-split" for incremental per-resource-type xDS, "ads" for Aggregated Discovery Service, or "strict-ads" for ADS with strict snapshot cache behavior and generated snapshot consistency checks (default "split")
       --force-device-detection                                    Forces the auto-detection of devices, even if specific devices are explicitly listed
       --gateway-api-secrets-namespace string                      GatewayAPISecretsNamespace is the namespace having tls secrets used by CEC, originating from Gateway API
       --gops-port uint16                                          Port for gops server to listen on (default 9890)
@@ -218,7 +219,6 @@ cilium-agent hive dot-graph [flags]
       --lb-state-file string                                      Synchronize load-balancing state from the specified file
       --lrp-address-matcher-cidrs strings                         Limit address matches to specific CIDRs
       --max-connected-clusters uint32                             Maximum number of clusters to be connected in a clustermesh. Increasing this value will reduce the maximum number of identities available. Valid configurations are [255, 511]. (default 255)
-      --mesh-auth-enabled                                         Enable authentication processing & garbage collection (beta)
       --mesh-auth-gc-interval duration                            Interval in which auth entries are attempted to be garbage collected (default 5m0s)
       --mesh-auth-mutual-connect-timeout duration                 Timeout for connecting to the remote node TCP socket (default 5s)
       --mesh-auth-mutual-listener-port int                        Port on which the Cilium Agent will perform mutual authentication handshakes between other Agents
@@ -233,7 +233,6 @@ cilium-agent hive dot-graph [flags]
       --multicast-enabled                                         Enables multicast in Cilium
       --nat-map-stats-entries int                                 Number k top stats entries to store locally in statedb (default 32)
       --nat-map-stats-interval duration                           Interval upon which nat maps are iterated for stats (default 30s)
-      --node-encryption-opt-out-labels string                     Label selector for nodes which will opt-out of node-to-node encryption (default "node-role.kubernetes.io/control-plane")
       --node-port-range strings                                   Set the min/max NodePort port range (default [30000,32767])
       --nodeport-addresses strings                                A whitelist of CIDRs to limit which IPs are used for NodePort. If not set, primary IPv4 and/or IPv6 address of each native device is used.
       --only-masquerade-default-pool                              When using multi-pool IPAM, only masquerade flows from the default IP pool. This will preserve source IPs for pods from non-default IP pools. Useful when combining multi-pool IPAM with BGP control plane. This option must be combined with enable-bpf-masquerade.

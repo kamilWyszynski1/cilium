@@ -116,6 +116,10 @@ func NewNodeHandler(
 			handler.RestoreNodeIDs()
 			return nil
 		},
+		OnStop: func(_ cell.HookContext) error {
+			nodeManager.Unsubscribe(handler)
+			return nil
+		},
 	})
 
 	return handler, handler
@@ -512,8 +516,8 @@ func (n *linuxNodeHandler) nodeUpdate(oldNode, newNode *nodeTypes.Node, firstAdd
 		errs error
 
 		oldAllIP4AllocCidrs, oldAllIP6AllocCidrs []netip.Prefix
-		newAllIP4AllocCidrs                      = cidrsToPrefixes(newNode.GetIPv4AllocCIDRs())
-		newAllIP6AllocCidrs                      = cidrsToPrefixes(newNode.GetIPv6AllocCIDRs())
+		newAllIP4AllocCidrs                      = newNode.GetIPv4AllocCIDRs()
+		newAllIP6AllocCidrs                      = newNode.GetIPv6AllocCIDRs()
 		oldIP4, oldIP6                           net.IP
 		newIP4                                   = newNode.GetNodeIP(false)
 		newIP6                                   = newNode.GetNodeIP(true)
@@ -525,8 +529,8 @@ func (n *linuxNodeHandler) nodeUpdate(oldNode, newNode *nodeTypes.Node, firstAdd
 	}
 
 	if oldNode != nil {
-		oldAllIP4AllocCidrs = cidrsToPrefixes(oldNode.GetIPv4AllocCIDRs())
-		oldAllIP6AllocCidrs = cidrsToPrefixes(oldNode.GetIPv6AllocCIDRs())
+		oldAllIP4AllocCidrs = oldNode.GetIPv4AllocCIDRs()
+		oldAllIP6AllocCidrs = oldNode.GetIPv6AllocCIDRs()
 		oldIP4 = oldNode.GetNodeIP(false)
 		oldIP6 = oldNode.GetNodeIP(true)
 
@@ -628,8 +632,8 @@ func (n *linuxNodeHandler) nodeDelete(oldNode *nodeTypes.Node) error {
 	oldIP4 := oldNode.GetNodeIP(false)
 	oldIP6 := oldNode.GetNodeIP(true)
 
-	oldAllIP4AllocCidrs := cidrsToPrefixes(oldNode.GetIPv4AllocCIDRs())
-	oldAllIP6AllocCidrs := cidrsToPrefixes(oldNode.GetIPv6AllocCIDRs())
+	oldAllIP4AllocCidrs := oldNode.GetIPv4AllocCIDRs()
+	oldAllIP6AllocCidrs := oldNode.GetIPv6AllocCIDRs()
 
 	var errs error
 	if n.nodeConfig.EnableAutoDirectRouting && !n.enableEncapsulation(oldNode) {

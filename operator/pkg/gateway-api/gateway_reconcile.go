@@ -4,13 +4,12 @@
 package gateway_api
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"sort"
+	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/google/go-cmp/cmp"
@@ -124,11 +123,25 @@ func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	mergedListeners, attachedListenerSets, err := r.resolveAllowedListeners(ctx, scopedLog, gw)
-	if err != nil {
-		scopedLog.ErrorContext(ctx, "Unable to resolve allowed ListenerSet listeners", logfields.Error, err)
+	grants := &gatewayv1.ReferenceGrantList{}
+	if err := r.Client.List(ctx, grants); err != nil {
+		scopedLog.ErrorContext(ctx, "Unable to list ReferenceGrants", logfields.Error, err)
 		return r.handleReconcileErrorWithStatus(ctx, err, original, gw)
 	}
+
+	var attachedListenerSets []gatewayv1.ListenerSet
+	if helpers.HasListenerSetSupport(r.Client.Scheme()) {
+		listenerSets, err := r.listenerSetsForGateway(ctx, gw)
+		if err != nil {
+			scopedLog.ErrorContext(ctx, "Unable to list ListenerSets", logfields.Error, err)
+			return r.handleReconcileErrorWithStatus(ctx, err, original, gw)
+		}
+		attachedListenerSets = r.filterToAllowedListenerSets(ctx, scopedLog, gw, listenerSets)
+	}
+	listenerContexts := r.mergeListeners(ctx, scopedLog, gw, attachedListenerSets)
+	conflictedListeners := conflictsAcrossSources(listenerContexts)
+	mergedListeners := filterOutConflictedListeners(listenerContexts, conflictedListeners)
+	mergedListeners = r.filterOutInvalidListeners(ctx, mergedListeners, grants.Items)
 
 	httpRouteList := &gatewayv1.HTTPRouteList{}
 	if err := r.Client.List(ctx, httpRouteList, &client.ListOptions{
@@ -282,11 +295,6 @@ func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	grants := &gatewayv1.ReferenceGrantList{}
-	if err := r.Client.List(ctx, grants); err != nil {
-		scopedLog.ErrorContext(ctx, "Unable to list ReferenceGrants", logfields.Error, err)
-		return r.handleReconcileErrorWithStatus(ctx, err, original, gw)
-	}
 	if gw.Spec.Infrastructure != nil && gw.Spec.Infrastructure.Annotations[annotation.LBIPAMIPKeyAlias] != "" {
 		scopedLog.WarnContext(ctx, fmt.Sprintf("DEPRECATED: The Gateway <%s/%s> is setting an IP address using the infrastructure annotations <%s>."+
 			" These should be set using the spec.addresses field in Gateway objects instead."+
@@ -357,7 +365,17 @@ func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		MergedListeners:     mergedListeners,
 	})
 
-	listenersStatus, err := r.setListenerStatus(ctx, gw, httpRouteList, tlsRouteList, grpcRouteList, tcpRouteList, udpRouteList, namespaceLabels)
+	listenersStatus, err := r.setListenerStatus(
+		ctx,
+		gw,
+		conflictedListeners,
+		httpRouteList,
+		tlsRouteList,
+		grpcRouteList,
+		tcpRouteList,
+		udpRouteList,
+		namespaceLabels,
+	)
 	if err != nil {
 		scopedLog.ErrorContext(ctx, "Unable to set listener status", logfields.Error, err)
 		setGatewayAccepted(gw, false, "Unable to set listener status", gatewayv1.GatewayReasonNoResources)
@@ -382,7 +400,18 @@ func (r *gatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Accepted and Programmed conditions. Those Gateway conditions reflect the
 	// Gateway's local configuration, so valid ListenerSets do not make an
 	// otherwise invalid Gateway accepted or programmed.
-	r.setListenerSetStatuses(ctx, gw, attachedListenerSets, httpRouteList, tlsRouteList, grpcRouteList, tcpRouteList, udpRouteList, namespaceLabels)
+	r.setListenerSetStatuses(
+		ctx,
+		gw,
+		attachedListenerSets,
+		conflictedListeners,
+		httpRouteList,
+		tlsRouteList,
+		grpcRouteList,
+		tcpRouteList,
+		udpRouteList,
+		namespaceLabels,
+	)
 
 	// Step 3: Translate the listeners into Cilium model
 	cec, svc, eps, err := r.translator.Translate(m)
@@ -736,37 +765,30 @@ func (r *gatewayReconciler) updateListenerSetStatus(ctx context.Context, origina
 	return r.Client.Status().Update(ctx, new)
 }
 
-func (r *gatewayReconciler) resolveAllowedListeners(
+func (r *gatewayReconciler) listenerSetsForGateway(
 	ctx context.Context,
-	scopedLog *slog.Logger,
 	gw *gatewayv1.Gateway,
-) ([]ingestion.ListenerWithContext, []gatewayv1.ListenerSet, error) {
-	gwSource := gatewayFQR(gw)
-
-	var merged []ingestion.ListenerWithContext
-	for _, l := range gw.Spec.Listeners {
-		merged = append(merged, ingestion.ListenerWithContext{
-			Listener: l,
-			Source:   gwSource,
-		})
-	}
-
-	if !helpers.HasListenerSetSupport(r.Client.Scheme()) {
-		return merged, nil, nil
-	}
-
+) ([]gatewayv1.ListenerSet, error) {
 	lsList := &gatewayv1.ListenerSetList{}
 	if err := r.Client.List(ctx, lsList, &client.ListOptions{
 		FieldSelector: fields.OneTermEqualSelector(indexers.ListenerSetGatewayIndex, client.ObjectKeyFromObject(gw).String()),
 	}); err != nil {
-		return nil, nil, fmt.Errorf("failed to list ListenerSets: %w", err)
+		return nil, fmt.Errorf("failed to list ListenerSets: %w", err)
 	}
 
 	sortListenerSets(lsList.Items)
+	return lsList.Items, nil
+}
 
-	var attachedSets []gatewayv1.ListenerSet
-	for i := range lsList.Items {
-		ls := &lsList.Items[i]
+func (r *gatewayReconciler) filterToAllowedListenerSets(
+	ctx context.Context,
+	scopedLog *slog.Logger,
+	gw *gatewayv1.Gateway,
+	listenerSets []gatewayv1.ListenerSet,
+) []gatewayv1.ListenerSet {
+	var allowed []gatewayv1.ListenerSet
+	for i := range listenerSets {
+		ls := &listenerSets[i]
 		if !isListenerSetAllowed(ctx, r.Client, gw, ls, scopedLog) {
 			original := ls.DeepCopy()
 			setListenerSetAccepted(ls, false, "ListenerSet is not allowed by the Gateway's allowedListeners policy", gatewayv1.ListenerSetReasonNotAllowed)
@@ -776,20 +798,84 @@ func (r *gatewayReconciler) resolveAllowedListeners(
 			}
 			continue
 		}
-		attachedSets = append(attachedSets, *ls)
+		allowed = append(allowed, *ls)
+	}
+	return allowed
+}
 
+func (r *gatewayReconciler) mergeListeners(
+	ctx context.Context,
+	scopedLog *slog.Logger,
+	gw *gatewayv1.Gateway,
+	listenerSets []gatewayv1.ListenerSet,
+) []ingestion.ListenerWithContext {
+	gwSource := gatewayFQR(gw)
+
+	var merged []ingestion.ListenerWithContext
+	for _, listener := range gw.Spec.Listeners {
+		merged = append(merged, ingestion.ListenerWithContext{
+			Listener:         listener,
+			Source:           gwSource,
+			SourceGeneration: gw.Generation,
+		})
+	}
+
+	for i := range listenerSets {
+		ls := &listenerSets[i]
 		lsSource := listenerSetFQR(ls)
 		for _, entry := range ls.Spec.Listeners {
 			listener := helpers.ListenerEntryToListener(entry)
 			merged = append(merged, ingestion.ListenerWithContext{
 				Listener:          listener,
 				Source:            lsSource,
+				SourceGeneration:  ls.Generation,
 				AllowedNamespaces: resolveAllowedNamespaces(ctx, r.Client, ls.GetNamespace(), listener, scopedLog),
 			})
 		}
 	}
 
-	return merged, attachedSets, nil
+	return merged
+}
+
+func filterOutConflictedListeners(
+	listeners []ingestion.ListenerWithContext,
+	conflictedListeners listenerConflictsBySource,
+) []ingestion.ListenerWithContext {
+	filtered := make([]ingestion.ListenerWithContext, 0, len(listeners))
+	for _, listener := range listeners {
+		if _, conflicted := conflictedListeners[listener.Source][listener.Name]; conflicted {
+			continue
+		}
+		filtered = append(filtered, listener)
+	}
+	return filtered
+}
+
+func (r *gatewayReconciler) filterOutInvalidListeners(
+	ctx context.Context,
+	listeners []ingestion.ListenerWithContext,
+	grants []gatewayv1.ReferenceGrant,
+) []ingestion.ListenerWithContext {
+	filtered := make([]ingestion.ListenerWithContext, 0, len(listeners))
+	for _, listener := range listeners {
+		res := r.validateListener(ctx, listener.Listener, listenerValidationParams{
+			ownerNamespace: listener.Source.Namespace,
+			ownerKind:      listener.Source.Kind,
+			generation:     listener.SourceGeneration,
+			grants:         grants,
+			ownerRef: types.NamespacedName{
+				Name:      listener.Source.Name,
+				Namespace: listener.Source.Namespace,
+			}.String(),
+		})
+
+		if !res.isValid {
+			continue
+		}
+
+		filtered = append(filtered, listener)
+	}
+	return filtered
 }
 
 // resolveAllowedNamespaces resolves a listener's allowedRoutes.namespaces policy
@@ -880,11 +966,16 @@ func (r *gatewayReconciler) getGatewayClassConfig(ctx context.Context, gwc *gate
 		return nil
 	}
 
-	res := &v2alpha1.CiliumGatewayClassConfig{}
-	if err := r.Client.Get(ctx, client.ObjectKey{
+	key := client.ObjectKey{
 		Namespace: string(*gwc.Spec.ParametersRef.Namespace),
 		Name:      gwc.Spec.ParametersRef.Name,
-	}, res); err != nil {
+	}
+
+	res := &v2alpha1.CiliumGatewayClassConfig{}
+	if err := r.Client.Get(ctx, key, res); err != nil {
+		r.logger.ErrorContext(ctx, "Failed to get CiliumGatewayClassConfig",
+			logfields.Resource, key,
+			logfields.Error, err)
 		return nil
 	}
 	return res
@@ -1024,19 +1115,23 @@ func (r *gatewayReconciler) setAddressStatus(ctx context.Context, gw *gatewayv1.
 			return fmt.Errorf("unable to list nodes")
 		}
 
-		ips := make([]net.IP, 0)
+		ips := make([]netip.Addr, 0)
 		for _, node := range nodes.Items {
 			if len(node.Status.Addresses) == 0 {
 				continue
 			}
 			nodeAddress := node.Status.Addresses[0]
-			ips = append(ips, net.ParseIP(nodeAddress.Address))
+			ip, err := netip.ParseAddr(nodeAddress.Address)
+			if err != nil {
+				// the first address is not an IP address (e.g. a hostname),
+				// skip the node instead of reporting an invalid address.
+				continue
+			}
+			ips = append(ips, ip.Unmap())
 		}
 
 		// sort the addresses for consistent ip addresses assigned
-		sort.Slice(ips, func(i, j int) bool {
-			return bytes.Compare(ips[i], ips[j]) < 0
-		})
+		slices.SortFunc(ips, netip.Addr.Compare)
 
 		// allows for only a max of 16 addresses
 		if len(ips) > 16 {
@@ -1146,13 +1241,23 @@ const (
 	ListenersStatusAllValid                     ListenersStatus = "AllValid"
 )
 
-func (r *gatewayReconciler) setListenerStatus(ctx context.Context, gw *gatewayv1.Gateway, httpRoutes *gatewayv1.HTTPRouteList, tlsRoutes *gatewayv1.TLSRouteList, grpcRoutes *gatewayv1.GRPCRouteList, tcpRoutes *gatewayv1.TCPRouteList, udpRoutes *gatewayv1.UDPRouteList, namespaceLabels helpers.NamespaceLabelIndex) (ListenersStatus, error) {
+func (r *gatewayReconciler) setListenerStatus(
+	ctx context.Context,
+	gw *gatewayv1.Gateway,
+	conflictedListeners listenerConflictsBySource,
+	httpRoutes *gatewayv1.HTTPRouteList,
+	tlsRoutes *gatewayv1.TLSRouteList,
+	grpcRoutes *gatewayv1.GRPCRouteList,
+	tcpRoutes *gatewayv1.TCPRouteList,
+	udpRoutes *gatewayv1.UDPRouteList,
+	namespaceLabels helpers.NamespaceLabelIndex,
+) (ListenersStatus, error) {
 	grants := &gatewayv1.ReferenceGrantList{}
 	if err := r.Client.List(ctx, grants); err != nil {
 		return "", fmt.Errorf("failed to retrieve reference grants: %w", err)
 	}
 
-	conflictedListeners := conflictedGatewayListeners(gw)
+	conflictedGatewayListeners := conflictedListeners[gatewayFQR(gw)]
 
 	validListeners := 0
 	unsupportedProtocolListeners := 0
@@ -1163,7 +1268,7 @@ func (r *gatewayReconciler) setListenerStatus(ctx context.Context, gw *gatewayv1
 
 		var conds []metav1.Condition
 
-		if conflict, ok := conflictedListeners[l.Name]; ok {
+		if conflict, ok := conflictedGatewayListeners[l.Name]; ok {
 			conds = merge(conds, listenerConflictedCondition(gw.GetGeneration(), conflict.reason, conflict.message))
 			invalidMessages = append(invalidMessages, conflict.message)
 			isValid = false
@@ -1171,7 +1276,7 @@ func (r *gatewayReconciler) setListenerStatus(ctx context.Context, gw *gatewayv1
 
 		res := r.validateListener(ctx, l, listenerValidationParams{
 			ownerNamespace: gw.Namespace,
-			ownerKind:      "Gateway",
+			ownerKind:      gw.Kind,
 			generation:     gw.GetGeneration(),
 			grants:         grants.Items,
 			ownerRef:       client.ObjectKeyFromObject(gw).String(),
@@ -1265,13 +1370,66 @@ type listenerConflict struct {
 	message string
 }
 
-func conflictedGatewayListeners(gw *gatewayv1.Gateway) map[gatewayv1.SectionName]listenerConflict {
+type listenerConflictsBySource map[model.FullyQualifiedResource]map[gatewayv1.SectionName]listenerConflict
+
+func conflictsAcrossSources(listeners []ingestion.ListenerWithContext) listenerConflictsBySource {
+	listenersBySource := make(map[model.FullyQualifiedResource][]gatewayv1.Listener)
+	var sources []model.FullyQualifiedResource
+	for _, listener := range listeners {
+		if _, knownSource := listenersBySource[listener.Source]; !knownSource {
+			sources = append(sources, listener.Source)
+		}
+		listenersBySource[listener.Source] = append(listenersBySource[listener.Source], listener.Listener)
+	}
+
+	conflicts := make(listenerConflictsBySource)
+	accepted := &acceptedListeners{}
+	for _, source := range sources {
+		var eligible []gatewayv1.Listener
+
+		for _, listener := range listenersBySource[source] {
+
+			// Find conflicts with any earlier accepted listener.
+			//
+			// The earlier, higher precedence, listener which conflicts is
+			// already in the accepted set
+			if reason := accepted.checkConflict(listener); reason != "" {
+				if conflicts[source] == nil {
+					conflicts[source] = map[gatewayv1.SectionName]listenerConflict{}
+				}
+				conflicts[source][listener.Name] = listenerConflict{reason: reason}
+				continue
+			}
+
+			eligible = append(eligible, listener)
+		}
+
+		// Find conflicts within the source.
+		//
+		// Such conflicts never enter the accepted set
+		for name, conflict := range conflictsWithinSource(eligible) {
+			if conflicts[source] == nil {
+				conflicts[source] = map[gatewayv1.SectionName]listenerConflict{}
+			}
+			conflicts[source][name] = conflict
+		}
+
+		for _, listener := range eligible {
+			if _, conflicted := conflicts[source][listener.Name]; !conflicted {
+				accepted.accept(listener)
+			}
+		}
+	}
+	return conflicts
+}
+
+func conflictsWithinSource(listeners []gatewayv1.Listener) map[gatewayv1.SectionName]listenerConflict {
 	conflicts := map[gatewayv1.SectionName]listenerConflict{}
 
-	for i := range gw.Spec.Listeners {
-		for j := i + 1; j < len(gw.Spec.Listeners); j++ {
-			first := &gw.Spec.Listeners[i]
-			second := &gw.Spec.Listeners[j]
+	for i := range listeners {
+		for j := i + 1; j < len(listeners); j++ {
+			first := &listeners[i]
+			second := &listeners[j]
 			reason, ok := listenerPairConflict(first, second)
 			if !ok {
 				continue
@@ -1405,8 +1563,7 @@ func (r *gatewayReconciler) verifyGatewayStaticAddresses(gw *gatewayv1.Gateway) 
 		if address.Value == "" {
 			return fmt.Errorf("address value is not set")
 		}
-		ip := net.ParseIP(address.Value)
-		if ip == nil {
+		if _, err := netip.ParseAddr(address.Value); err != nil {
 			return fmt.Errorf("invalid ip address")
 		}
 	}
@@ -1442,6 +1599,14 @@ func (r *gatewayReconciler) validateListener(ctx context.Context, l gatewayv1.Li
 		res.isValid = false
 	}
 
+	if r.hostNetworkEnabled && isL4Protocol(l.Protocol) {
+		res.invalidMessages = append(res.invalidMessages,
+			fmt.Sprintf("%s listeners are not supported when Gateway API Host Network mode is enabled", l.Protocol))
+		res.invalidReason = gatewayv1.ListenerReasonUnsupportedProtocol
+		res.isValid = false
+		return res
+	}
+
 	if l.AllowedRoutes != nil && len(l.AllowedRoutes.Kinds) > 0 {
 		res.supportedKinds = []gatewayv1.RouteGroupKind{}
 		for _, supported := range allSupported {
@@ -1467,7 +1632,7 @@ func (r *gatewayReconciler) validateListener(ctx context.Context, l gatewayv1.Li
 	}
 
 	if l.TLS != nil {
-		ownerGVK := gatewayv1.SchemeGroupVersion.WithKind(params.ownerKind)
+		ownerGVK := helpers.GatewayV1GVK(params.ownerKind)
 		for _, cert := range l.TLS.CertificateRefs {
 			if !helpers.IsSecret(cert) {
 				res.conds = merge(res.conds, metav1.Condition{
@@ -1553,6 +1718,7 @@ func (r *gatewayReconciler) setListenerSetStatuses(
 	ctx context.Context,
 	gw *gatewayv1.Gateway,
 	attachedListenerSets []gatewayv1.ListenerSet,
+	conflictedListeners listenerConflictsBySource,
 	httpRoutes *gatewayv1.HTTPRouteList,
 	tlsRoutes *gatewayv1.TLSRouteList,
 	grpcRoutes *gatewayv1.GRPCRouteList,
@@ -1568,17 +1734,11 @@ func (r *gatewayReconciler) setListenerSetStatuses(
 		return
 	}
 
-	// Seed the accumulator with the direct Gateway listeners, which take
-	// precedence over any ListenerSet listener.
-	accepted := &acceptedListeners{}
-	for _, l := range gw.Spec.Listeners {
-		accepted.accept(l)
-	}
-
 	var validAttachedCount int32
 	for i := range attachedListenerSets {
 		ls := &attachedListenerSets[i]
 		original := ls.DeepCopy()
+		lsSource := listenerSetFQR(ls)
 
 		oneValidListener := false
 		var listenerStatuses []gatewayv1.ListenerEntryStatus
@@ -1587,14 +1747,13 @@ func (r *gatewayReconciler) setListenerSetStatuses(
 			l := helpers.ListenerEntryToListener(entry)
 			var conds []metav1.Condition
 
-			conflictReason := accepted.checkConflict(l)
-			isConflicted := conflictReason != ""
+			conflict, isConflicted := conflictedListeners[lsSource][l.Name]
 
 			if isConflicted {
 				conds = merge(conds,
-					listenerAcceptedCondition(ls.GetGeneration(), false, conflictReason, "Listener has a conflict"),
-					listenerProgrammedCondition(ls.GetGeneration(), false, conflictReason, "Listener has a conflict"),
-					listenerConflictedCondition(ls.GetGeneration(), conflictReason, "Listener has a conflict"),
+					listenerAcceptedCondition(ls.GetGeneration(), false, conflict.reason, "Listener has a conflict"),
+					listenerProgrammedCondition(ls.GetGeneration(), false, conflict.reason, "Listener has a conflict"),
+					listenerConflictedCondition(ls.GetGeneration(), conflict.reason, "Listener has a conflict"),
 					metav1.Condition{
 						Type:               string(gatewayv1.ListenerConditionResolvedRefs),
 						Status:             metav1.ConditionTrue,
@@ -1610,7 +1769,7 @@ func (r *gatewayReconciler) setListenerSetStatuses(
 			if !isConflicted {
 				res := r.validateListener(ctx, l, listenerValidationParams{
 					ownerNamespace: ls.Namespace,
-					ownerKind:      "ListenerSet",
+					ownerKind:      ls.Kind,
 					generation:     ls.GetGeneration(),
 					grants:         grants.Items,
 					ownerRef:       client.ObjectKeyFromObject(ls).String(),
@@ -1626,8 +1785,6 @@ func (r *gatewayReconciler) setListenerSetStatuses(
 					)
 				} else {
 					oneValidListener = true
-					// Claim this slot for subsequent listeners
-					accepted.accept(l)
 
 					// If ResolvedRefs is not already present, add a successful one.
 					if !helpers.IsConditionPresent(conds, string(gatewayv1.ListenerConditionResolvedRefs)) {
@@ -1647,7 +1804,6 @@ func (r *gatewayReconciler) setListenerSetStatuses(
 				}
 			}
 
-			lsSource := listenerSetFQR(ls)
 			var attachedRoutes int32
 			attachedRoutes += int32(len(r.filterHTTPRoutesByListener(ctx, gw, &l, &lsSource, httpRoutes.Items, namespaceLabels, *ls)))
 			attachedRoutes += int32(len(r.filterGRPCRoutesByListener(ctx, gw, &l, &lsSource, grpcRoutes.Items, namespaceLabels, *ls)))
@@ -1704,6 +1860,30 @@ func (r *gatewayReconciler) runCommonRouteChecks(ctx context.Context, input rout
 	return nil
 }
 
+// checkRouteSupported returns false when route validation should stop for this input.
+func (r *gatewayReconciler) checkRouteSupported(input routechecks.Input, parent gatewayv1.ParentReference) bool {
+	switch k := input.GetGVK().Kind; k {
+	case kindTCPRoute, kindUDPRoute:
+		if r.hostNetworkEnabled {
+			input.SetParentCondition(parent, metav1.Condition{
+				Type:    string(gatewayv1.RouteConditionAccepted),
+				Status:  metav1.ConditionFalse,
+				Reason:  string(gatewayv1.RouteReasonUnsupportedValue),
+				Message: fmt.Sprintf("%s is not supported when Gateway API Host Network mode is enabled", k),
+			})
+			input.SetParentCondition(parent, metav1.Condition{
+				Type:    string(gatewayv1.RouteConditionResolvedRefs),
+				Status:  metav1.ConditionUnknown,
+				Reason:  string(gatewayv1.RouteReasonPending),
+				Message: "Backend references were not evaluated because this route type is not supported in Gateway API Host Network mode",
+			})
+			return false
+		}
+	}
+
+	return true
+}
+
 var gatewayCheckFuncs = []routechecks.CheckWithParentFunc{
 	routechecks.CheckGatewayMatchingProtocol,
 	routechecks.CheckGatewayRouteKindAllowed,
@@ -1753,6 +1933,10 @@ func (r *gatewayReconciler) runGatewayRouteChecks(ctx context.Context, input rou
 		return nil
 	}
 
+	if !r.checkRouteSupported(input, parent) {
+		return nil
+	}
+
 	setInitialRouteConditions(input, parent)
 
 	if err := runCheckFuncs(input, parent, gatewayCheckFuncs, "Gateway"); err != nil {
@@ -1779,6 +1963,10 @@ func (r *gatewayReconciler) runListenerSetRouteChecks(ctx context.Context, input
 
 	hasMatchingControllerFn := helpers.GatewayHasMatchingControllerFn(ctx, r.Client, r.controllerName, r.logger)
 	if !hasMatchingControllerFn(gw) {
+		return nil
+	}
+
+	if !r.checkRouteSupported(input, parent) {
 		return nil
 	}
 
@@ -1829,9 +2017,15 @@ func (r *gatewayReconciler) setHTTPRouteStatuses(scopedLog *slog.Logger, ctx con
 
 		// Route-specific checks will go in here separately if required.
 
-		// Validate the HTTPRoute header name
-		if err := i.ValidateHeaderModifier(); err != nil {
-			return r.handleHTTPRouteReconcileErrorWithStatus(ctx, scopedLog, err, &original, hr)
+		for _, validate := range []func() (metav1.Condition, bool){
+			i.ValidateHeaderModifier,
+			i.ValidateMatchRegexps,
+		} {
+			if cond, invalid := validate(); invalid {
+				for _, parent := range hr.Status.Parents {
+					i.SetParentCondition(parent.ParentRef, cond)
+				}
+			}
 		}
 
 		// Checks finished, apply the status to the actual objects.
@@ -1904,7 +2098,11 @@ func (r *gatewayReconciler) setGRPCRouteStatuses(scopedLog *slog.Logger, ctx con
 			return r.handleGRPCRouteReconcileErrorWithStatus(ctx, scopedLog, err, grpcr, &original)
 		}
 
-		// Route-specific checks will go in here separately if required.
+		if cond, invalid := i.ValidateMatchRegexps(); invalid {
+			for _, parent := range grpcr.Status.Parents {
+				i.SetParentCondition(parent.ParentRef, cond)
+			}
+		}
 
 		// Checks finished, apply the status to the actual objects.
 		if err := r.updateGRPCRouteStatus(ctx, scopedLog, &original, grpcr); err != nil {
@@ -2194,6 +2392,7 @@ func (r *gatewayReconciler) setTCPRouteStatuses(scopedLog *slog.Logger, ctx cont
 	for tcpRouteIndex, original := range tcpRoutes.Items {
 
 		tcpr := original.DeepCopy()
+		tcpr.Status.Parents = pruneRouteParentStatuses(tcpr.Status.Parents, tcpr.Spec.ParentRefs, r.controllerName)
 
 		i := &routechecks.TCPRouteInput{
 			Ctx:            ctx,
@@ -2225,6 +2424,7 @@ func (r *gatewayReconciler) setUDPRouteStatuses(scopedLog *slog.Logger, ctx cont
 	for udpRouteIndex, original := range udpRoutes.Items {
 
 		udpr := original.DeepCopy()
+		udpr.Status.Parents = pruneRouteParentStatuses(udpr.Status.Parents, udpr.Spec.ParentRefs, r.controllerName)
 
 		i := &routechecks.UDPRouteInput{
 			Ctx:            ctx,

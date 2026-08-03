@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cilium/hive/cell"
@@ -256,6 +257,26 @@ func TestFilteringResource_Events(t *testing.T) {
 	}
 }
 
+func TestFilteringResource_Events_Drain(t *testing.T) {
+	// Validate that no goroutine is leaked even if we don't drain the events
+	// channel. We leverage synctest to obtain a better failure, as it fails
+	// if any goroutine in the bubble deadlocks.
+	synctest.Test(t, func(t *testing.T) {
+		var (
+			store = &fakeStore[*testObject]{}
+			fake  = &fakeResource[*testObject]{
+				events: make(chan resource.Event[*testObject]),
+				store:  store,
+			}
+		)
+
+		_ = resource.NewFilteringResource(fake, func(obj *testObject) bool { return true }).Events(t.Context())
+
+		fake.events <- resource.Event[*testObject]{Kind: resource.Sync, Done: func(err error) {}}
+		close(fake.events)
+	})
+}
+
 func TestFilteringResource_Observe(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -353,6 +374,11 @@ func TestFilteringResource_Observe_context_cancel(t *testing.T) {
 
 	// We don't push events to blockingEvents, so Observe only returns if ctx is Done
 	wg.Wait()
+
+	// Mimic what the actual implementation would do when the context is canceled,
+	// and close the upstream events channel. This ensures that the goroutine can
+	// terminate, as otherwise flagged by goleak.
+	close(fake.events)
 }
 
 func TestFilteredResource_WithFakeClient(t *testing.T) {

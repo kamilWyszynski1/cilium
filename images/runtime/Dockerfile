@@ -3,16 +3,14 @@
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
-ARG GOLANG_IMAGE=docker.io/library/golang:1.26.5@sha256:63f132d58c1f589f0dcda584933a9bb44bfda1150f1506377f5a902f34d86033
-ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+ARG GOLANG_IMAGE=docker.io/library/golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:26.04@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
 
-ARG CILIUM_LLVM_IMAGE=quay.io/cilium/cilium-llvm:19.1.7-1772622536-65b121f@sha256:4320b57bde46d6642efeb72e405f699a5e189f8377614900f58f54f2641afdf3
-ARG CILIUM_BPFTOOL_IMAGE=quay.io/cilium/cilium-bpftool:7.6.0-1772622536-65b121f@sha256:7bd6330b1d92eb1e923cd7d1ad44808ac7598b4661a6726fabf24407a95f5bde
-ARG CILIUM_IPTABLES_IMAGE=quay.io/cilium/iptables:1.8.8-1-1772622536-65b121f@sha256:b940f10add6cffbd8f73f7cfcfc50e769dd27102f0dcb9486a1a88a36223b90a
+ARG CILIUM_LLVM_IMAGE=quay.io/cilium/cilium-llvm:19.1.7-1782898005-bed4da5@sha256:270bf0e70853c388b72c2247e4ade91d35d74898e2ec12edd5b72ace9ee34333
+ARG CILIUM_BPFTOOL_IMAGE=quay.io/cilium/cilium-bpftool:7.7.0-1782898005-bed4da5@sha256:dcfaf42007b0ba55cb73010d078e57139450c89fd697b21817c62dbfeb65095c
 
 FROM ${CILIUM_LLVM_IMAGE} AS llvm-dist
 FROM ${CILIUM_BPFTOOL_IMAGE} AS bpftool-dist
-FROM ${CILIUM_IPTABLES_IMAGE} AS iptables-dist
 
 FROM ${GOLANG_IMAGE} AS go-builder
 
@@ -47,9 +45,6 @@ RUN apt-get update && \
 WORKDIR /go/src/github.com/cilium/cilium/images/runtime
 RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium/images/runtime \
     ./install-runtime-deps.sh
-
-COPY --from=iptables-dist /iptables /iptables
-RUN dpkg -i /iptables/*\.deb && rm -rf /iptables
 
 COPY --from=go-builder /out /
 

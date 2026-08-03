@@ -107,8 +107,6 @@ cilium-operator-aws hive [flags]
       --loadbalancer-l7-algorithm string                           Default LB algorithm for services that do not specify related annotation (default "round_robin")
       --loadbalancer-l7-ports strings                              List of service ports that will be automatically redirected to backend.
       --max-connected-clusters uint32                              Maximum number of clusters to be connected in a clustermesh. Increasing this value will reduce the maximum number of identities available. Valid configurations are [255, 511]. (default 255)
-      --mesh-auth-enabled                                          Enable authentication processing & garbage collection (beta)
-      --mesh-auth-mutual-enabled                                   The flag to enable mutual authentication for the SPIRE server (beta).
       --mesh-auth-spiffe-trust-domain string                       The trust domain for the SPIFFE identity. (default "spiffe.cilium")
       --mesh-auth-spire-agent-socket string                        The path for the SPIRE admin agent Unix socket. (default "/run/spire/sockets/agent/agent.sock")
       --mesh-auth-spire-server-address string                      SPIRE server endpoint. (default "spire-server.spire.svc:8081")
@@ -143,6 +141,7 @@ cilium-operator-aws hive [flags]
       --subnet-ids-filter strings                                  Subnets IDs (separated by commas)
       --subnet-tags-filter stringToString                          Subnets tags in the form of k1=v1,k2=v2 (multiple k/v pairs can also be passed by repeating the CLI flag (default [])
       --synchronize-k8s-nodes                                      Perform GC of stale node entries from the KVStore (default true)
+      --synchronize-k8s-services                                   Synchronize Kubernetes services to kvstore (default true)
       --taint-sync-workers int                                     Number of workers used to synchronize node taints and conditions (default 10)
       --unmanaged-pod-watcher-interval duration                    Interval to check for unmanaged kube-dns pods (0 to disable) (default 15s)
       --validate-network-policy                                    Whether to enable or disable the informational network policy validator (default true)

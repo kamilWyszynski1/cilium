@@ -1,4 +1,8 @@
 {{- $envoyXdsMode := include "envoyXdsMode" . -}}
+{{- $envoyXdsApiType := "GRPC" -}}
+{{- if contains "delta-" $envoyXdsMode -}}
+{{- $envoyXdsApiType = "DELTA_GRPC" -}}
+{{- end -}}
 node:
   id: "host~127.0.0.1~no-id~localdomain"
   cluster: "ingress-cluster"
@@ -7,6 +11,13 @@ clusterManager:
   # Zone-aware load balancing depends on Envoy's local cluster wiring.
   # Keep this aligned with a statically defined cluster name in this bootstrap.
   localClusterName: "/cilium-locality-cluster"
+{{- end }}
+{{- with .Values.envoy.staticRuntimeConfig }}
+layeredRuntime:
+  layers:
+  - name: static_layer_0
+    staticLayer:
+      {{- toYaml . | nindent 6 }}
 {{- end }}
 staticResources:
   listeners:
@@ -277,14 +288,19 @@ staticResources:
     connectTimeout: "{{ .Values.envoy.connectTimeoutSeconds }}s"
     edsClusterConfig:
       edsConfig:
+        {{- if or (eq $envoyXdsMode "ads") (eq $envoyXdsMode "strict-ads") }}
+        ads: {}
+        resourceApiVersion: "V3"
+        {{- else }}
         apiConfigSource:
-          apiType: "GRPC"
+          apiType: {{ $envoyXdsApiType | quote }}
           transportApiVersion: "V3"
           grpcServices:
           - envoyGrpc:
               clusterName: "xds-grpc-cilium"
           setNodeOnFirstMessageOnly: true
         resourceApiVersion: "V3"
+        {{- end }}
       serviceName: "/cilium-locality-cluster"
     lbPolicy: "ROUND_ROBIN"
   {{- end }}
@@ -300,9 +316,9 @@ staticResources:
               pipe:
                 path: "/var/run/cilium/envoy/sockets/admin.sock"
 dynamicResources:
-{{- if or (eq $envoyXdsMode "ads") (eq $envoyXdsMode "strict-ads") }}
+{{- if or (eq $envoyXdsMode "ads") (hasSuffix "-ads" $envoyXdsMode) }}
   adsConfig:
-    apiType: "GRPC"
+    apiType: {{ $envoyXdsApiType | quote }}
     transportApiVersion: "V3"
     setNodeOnFirstMessageOnly: true
     grpcServices:
@@ -320,7 +336,7 @@ dynamicResources:
   ldsConfig:
     initialFetchTimeout: "{{ .Values.envoy.initialFetchTimeoutSeconds }}s"
     apiConfigSource:
-      apiType: "GRPC"
+      apiType: {{ $envoyXdsApiType | quote }}
       transportApiVersion: "V3"
       grpcServices:
       - envoyGrpc:
@@ -330,7 +346,7 @@ dynamicResources:
   cdsConfig:
     initialFetchTimeout: "{{ .Values.envoy.initialFetchTimeoutSeconds }}s"
     apiConfigSource:
-      apiType: "GRPC"
+      apiType: {{ $envoyXdsApiType | quote }}
       transportApiVersion: "V3"
       grpcServices:
       - envoyGrpc:

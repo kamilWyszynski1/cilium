@@ -62,16 +62,16 @@ ifeq ($(DOCKER_IMAGE_TAG),)
 endif
 
 # renovate: datasource=docker depName=gcr.io/etcd-development/etcd
-ETCD_IMAGE_VERSION = v3.6.11
-ETCD_IMAGE_SHA = sha256:fbab3d2954652f592b2653cc1b9decdbe2a633de9320735e9f364b185b6b309a
+ETCD_IMAGE_VERSION = v3.7.1
+ETCD_IMAGE_SHA = sha256:a9983dd6d9283138ab926daa307c6c25623636703ecf5645d5df4d666ce9eba2
 ETCD_IMAGE=gcr.io/etcd-development/etcd:$(ETCD_IMAGE_VERSION)@$(ETCD_IMAGE_SHA)
 
 export CILIUM_CLI ?= cilium
 export KUBECTL ?= kubectl
 
 # renovate: datasource=docker depName=quay.io/goswagger/swagger
-SWAGGER_VERSION = 0.34.1
-SWAGGER_IMAGE_SHA = sha256:e4e89fcb84027a313d8d315a32cecaf2da76e2d8efb9546124082021b6e74389
+SWAGGER_VERSION = 0.36.1
+SWAGGER_IMAGE_SHA = sha256:5a9c4bafe0dde50e5d910fad4f96d711886ad7d45390cce1dffead26c6472a1e
 SWAGGER := $(CONTAINER_ENGINE) run -u $(shell id -u):$(shell id -g) --rm -v $(ROOT_DIR):$(ROOT_DIR) -w $(ROOT_DIR) --entrypoint swagger quay.io/goswagger/swagger:$(SWAGGER_VERSION)@$(SWAGGER_IMAGE_SHA)
 
 # go build/test/clean flags

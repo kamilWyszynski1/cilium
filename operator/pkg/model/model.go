@@ -106,6 +106,12 @@ type HTTPListener struct {
 	// the final rendered Envoy Config.
 	ForceHTTPtoHTTPSRedirect bool `json:"force_http_to_https_redirect,omitempty"`
 
+	// ServerHeaderTransformation controls the HTTP "Server" header.
+	// OVERWRITE (default): Overwrite any Server header with "envoy".
+	// APPEND_IF_ABSENT: If no Server header is present, append Server "envoy". If a Server header is present, pass it through.
+	// PASS_THROUGH: Pass through the value of the server header, and do not append a header if none is present.
+	ServerHeaderTransformation ServerHeaderTransformation `json:"server_header_transformation,omitempty"`
+
 	// Gamma is an indicator if this listener is a gamma listener
 	Gamma bool `json:"gamma,omitempty"`
 }
@@ -335,6 +341,27 @@ type FullyQualifiedResource struct {
 	UID       string `json:"uid,omitempty"`
 }
 
+// HTTPRouteRule identifies the Gateway API HTTPRoute rule and match that
+// produced a model HTTPRoute.
+type HTTPRouteRule struct {
+	Source     FullyQualifiedResource
+	RuleIndex  int
+	MatchIndex int
+}
+
+func (r HTTPRouteRule) key() string {
+	return "httproute-rule:" + strings.Join([]string{
+		r.Source.Group,
+		r.Source.Version,
+		r.Source.Kind,
+		r.Source.Namespace,
+		r.Source.Name,
+		r.Source.UID,
+		strconv.Itoa(r.RuleIndex),
+		strconv.Itoa(r.MatchIndex),
+	}, "/")
+}
+
 // TLSSecret holds a reference to a secret containing a TLS keypair.
 type TLSSecret struct {
 	Name      string `json:"name,omitempty"`
@@ -471,6 +498,9 @@ type HTTPCORSFilter struct {
 // HTTPRoute holds all the details needed to route HTTP traffic to a backend.
 type HTTPRoute struct {
 	Name string `json:"name,omitempty"`
+	// SourceRule identifies the Gateway API HTTPRoute rule and match that
+	// produced this route when rule identity must be preserved internally.
+	SourceRule *HTTPRouteRule `json:"-"`
 	// Hostnames that the route should match
 	Hostnames []string `json:"hostnames,omitempty"`
 	// PathMatch specifies that the HTTPRoute should match a path.
@@ -544,7 +574,7 @@ type Infrastructure struct {
 	Annotations map[string]string
 }
 
-// GetMatchKey returns the key to be used for matching the backend.
+// GetMatchKey returns the key for this route's request match criteria.
 func (r *HTTPRoute) GetMatchKey() string {
 	sb := strings.Builder{}
 
@@ -558,19 +588,21 @@ func (r *HTTPRoute) GetMatchKey() string {
 	sb.WriteString(r.PathMatch.String())
 	sb.WriteString("|")
 
-	sort.Slice(r.HeadersMatch, func(i, j int) bool {
-		return r.HeadersMatch[i].String() < r.HeadersMatch[j].String()
+	headers := append([]KeyValueMatch(nil), r.HeadersMatch...)
+	sort.Slice(headers, func(i, j int) bool {
+		return headers[i].String() < headers[j].String()
 	})
-	for _, hm := range r.HeadersMatch {
+	for _, hm := range headers {
 		sb.WriteString("header:")
 		sb.WriteString(hm.String())
 		sb.WriteString("|")
 	}
 
-	sort.Slice(r.QueryParamsMatch, func(i, j int) bool {
-		return r.QueryParamsMatch[i].String() < r.QueryParamsMatch[j].String()
+	queryParams := append([]KeyValueMatch(nil), r.QueryParamsMatch...)
+	sort.Slice(queryParams, func(i, j int) bool {
+		return queryParams[i].String() < queryParams[j].String()
 	})
-	for _, qm := range r.QueryParamsMatch {
+	for _, qm := range queryParams {
 		sb.WriteString("query:")
 		sb.WriteString(qm.String())
 		sb.WriteString("|")
@@ -597,6 +629,17 @@ func (r *HTTPRoute) GetMatchKey() string {
 	}
 
 	return sb.String()
+}
+
+// GetBackendAggregationKey returns the key used to group backend actions into a
+// single Envoy route. Gateway API routes use rule identity so identical matches
+// from different rules remain separate and retain rule precedence. Legacy
+// callers without rule identity keep the existing match-key aggregation.
+func (r *HTTPRoute) GetBackendAggregationKey() string {
+	if r.SourceRule == nil {
+		return r.GetMatchKey()
+	}
+	return r.SourceRule.key()
 }
 
 // TLSPassthroughRoute holds all the details needed to route TLS traffic to a backend.
@@ -724,6 +767,16 @@ type HTTPRetry struct {
 	// Backoff specifies the minimum duration a Gateway should wait between
 	// retry attempts
 	Backoff *time.Duration `json:"backoff,omitempty"`
+}
+
+// GetServerHeaderTransformation returns the first non-empty server header transformation from HTTP listeners.
+func (m *Model) GetServerHeaderTransformation() ServerHeaderTransformation {
+	for _, l := range m.HTTP {
+		if l.ServerHeaderTransformation != "" {
+			return l.ServerHeaderTransformation
+		}
+	}
+	return ServerHeaderTransformationOverwrite
 }
 
 // IsEmpty returns true if the model has no HTTP, TLS Passthrough or L4 listeners.

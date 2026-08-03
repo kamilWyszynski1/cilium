@@ -22,10 +22,12 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/cilium/cilium/operator/pkg/model"
 	"github.com/cilium/cilium/pkg/envoy"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	syncnames "github.com/cilium/cilium/pkg/secretsync/names"
 	"github.com/cilium/cilium/pkg/slices"
 )
 
@@ -179,6 +181,47 @@ func WithStreamIdleTimeout(streamIdleTimeoutSeconds int) ListenerMutator {
 						}
 					}
 				}
+			}
+		}
+		return listener
+	}
+}
+
+func withServerHeaderTransformation(m *model.Model) ListenerMutator {
+	return func(listener *envoy_config_listener.Listener) *envoy_config_listener.Listener {
+		transformation := m.GetServerHeaderTransformation()
+		// Skip if using Envoy's default (OVERWRITE, 0)
+		if transformation == model.ServerHeaderTransformationOverwrite {
+			return listener
+		}
+		for _, filterChain := range listener.FilterChains {
+			for _, filter := range filterChain.Filters {
+				if filter.Name != httpConnectionManagerType {
+					continue
+				}
+				tc := filter.GetTypedConfig()
+				if tc.GetTypeUrl() != envoy.HttpConnectionManagerTypeURL {
+					continue
+				}
+				hcm, err := tc.UnmarshalNew()
+				if err != nil {
+					continue
+				}
+				hcmConfig, ok := hcm.(*httpConnectionManagerv3.HttpConnectionManager)
+				if !ok {
+					continue
+				}
+				var hcmTransform httpConnectionManagerv3.HttpConnectionManager_ServerHeaderTransformation
+				switch transformation {
+				case model.ServerHeaderTransformationAppendIfAbsent:
+					hcmTransform = httpConnectionManagerv3.HttpConnectionManager_APPEND_IF_ABSENT
+				case model.ServerHeaderTransformationPassThrough:
+					hcmTransform = httpConnectionManagerv3.HttpConnectionManager_PASS_THROUGH
+				default:
+					continue
+				}
+				hcmConfig.ServerHeaderTransformation = hcmTransform
+				filter.ConfigType = &envoy_config_listener.Filter_TypedConfig{TypedConfig: toAny(hcmConfig)}
 			}
 		}
 		return listener
@@ -531,6 +574,8 @@ func (i *cecTranslator) listenerMutatorsForPorts(m *model.Model, ports []uint32)
 	if i.Config.OriginalIPDetectionConfig.XFFNumTrustedHops > 0 {
 		res = append(res, withXffNumTrustedHops(i.Config.OriginalIPDetectionConfig.XFFNumTrustedHops))
 	}
+
+	res = append(res, withServerHeaderTransformation(m))
 	return res
 }
 
@@ -852,7 +897,7 @@ func toTransportSocket(ciliumSecretNamespace string, tls []model.TLSSecret) *env
 	var tlsSdsConfig []*envoy_extensions_transport_sockets_tls_v3.SdsSecretConfig
 	tlsMap := map[string]struct{}{}
 	for _, t := range tls {
-		tlsMap[fmt.Sprintf("%s/%s-%s", ciliumSecretNamespace, t.Namespace, t.Name)] = struct{}{}
+		tlsMap[syncnames.SyncedSDSSecretName(ciliumSecretNamespace, types.NamespacedName{Namespace: t.Namespace, Name: t.Name})] = struct{}{}
 	}
 
 	for k := range tlsMap {

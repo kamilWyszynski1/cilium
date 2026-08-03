@@ -27,7 +27,6 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/cilium/cilium/pkg/backoff"
-	"github.com/cilium/cilium/pkg/cidr"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/iptables/ipset"
@@ -792,8 +791,8 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 		m.ipcache.UpsertMetadataBatch(mu...)
 	}
 
-	for _, address := range []net.IP{n.IPv4HealthIP, n.IPv6HealthIP} {
-		prefix := ip.IPToNetPrefix(address)
+	for _, address := range []netip.Addr{n.IPv4HealthIP.Addr, n.IPv6HealthIP.Addr} {
+		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() {
 			continue
 		}
@@ -910,10 +909,10 @@ func (m *manager) NodeUpdated(n nodeTypes.Node) {
 	}
 }
 
-func (m *manager) cidrsToPrefixesCluster(n *nodeTypes.Node, cidrs ...*cidr.CIDR) iter.Seq[cmtypes.PrefixCluster] {
+func (m *manager) cidrsToPrefixesCluster(n *nodeTypes.Node, prefixes ...netip.Prefix) iter.Seq[cmtypes.PrefixCluster] {
 	return func(yield func(cmtypes.PrefixCluster) bool) {
-		for _, cidr := range cidrs {
-			if !yield(cmtypes.PrefixClusterFromCIDR(cidr, m.prefixClusterMutatorFn(n)...)) {
+		for _, prefix := range prefixes {
+			if !yield(cmtypes.PrefixClusterFrom(prefix, m.prefixClusterMutatorFn(n)...)) {
 				return
 			}
 		}
@@ -1040,8 +1039,8 @@ func (m *manager) removeNodeFromIPCache(oldNode nodeTypes.Node, resource ipcache
 	}
 
 	// Delete the old health IP addresses if they have changed in this node.
-	for _, address := range []net.IP{oldNode.IPv4HealthIP, oldNode.IPv6HealthIP} {
-		prefix := ip.IPToNetPrefix(address)
+	for _, address := range []netip.Addr{oldNode.IPv4HealthIP.Addr, oldNode.IPv6HealthIP.Addr} {
+		prefix := netip.PrefixFrom(address, address.BitLen())
 		if !prefix.IsValid() || slices.Contains(healthIPsAdded, prefix) {
 			continue
 		}

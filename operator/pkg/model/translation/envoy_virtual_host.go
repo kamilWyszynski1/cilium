@@ -76,10 +76,6 @@ func (s SortableRoute) Less(i, j int) bool {
 	// There are two types of prefix match, so get whichever one is bigger
 	prefixMatch1 := max(len(s[i].Match.GetPathSeparatedPrefix()), len(s[i].Match.GetPrefix()))
 	prefixMatch2 := max(len(s[j].Match.GetPathSeparatedPrefix()), len(s[j].Match.GetPrefix()))
-	headerMatch1 := len(s[i].Match.GetHeaders())
-	headerMatch2 := len(s[j].Match.GetHeaders())
-	queryMatch1 := len(s[i].Match.GetQueryParameters())
-	queryMatch2 := len(s[j].Match.GetQueryParameters())
 
 	// Next up, sort by prefix match length
 	if prefixMatch1 != prefixMatch2 {
@@ -101,12 +97,36 @@ func (s SortableRoute) Less(i, j int) bool {
 	}
 
 	// If that's the same, then sort by header length
+	headerMatch1 := countMatchingHeaders(s[i].Match.GetHeaders())
+	headerMatch2 := countMatchingHeaders(s[j].Match.GetHeaders())
 	if headerMatch1 != headerMatch2 {
 		return headerMatch1 > headerMatch2
 	}
 
 	// lastly, sort by query match length
+	queryMatch1 := len(s[i].Match.GetQueryParameters())
+	queryMatch2 := len(s[j].Match.GetQueryParameters())
 	return queryMatch1 > queryMatch2
+}
+
+// countMatchingHeaders returns the number of Gateway API header matches that
+// contribute to HTTPRoute precedence.
+func countMatchingHeaders(headers []*envoy_config_route_v3.HeaderMatcher) int {
+	count := 0
+	for _, header := range headers {
+		sm := header.GetStringMatch()
+		// Cilium adds an inverted X-Forwarded-Proto match to prevent redirect loops.
+		// Since this is an internal scheme redirect guard rather than a Gateway API
+		// header match, ignore it when counting headers for route precedence. Only
+		// Cilium-generated redirect guards set IgnoreCase here, which lets us
+		// distinguish them from user-defined X-Forwarded-Proto matches.
+		if header.Name == "X-Forwarded-Proto" && header.GetInvertMatch() && sm != nil && sm.IgnoreCase {
+			continue
+		}
+		count++
+	}
+
+	return count
 }
 
 func getMethod(headers []*envoy_config_route_v3.HeaderMatcher) *string {
@@ -256,12 +276,14 @@ func getTypedPerFilterConfig(routeAuth *model.HTTPExternalAuthFilter, allAuthFil
 func envoyHTTPSRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostNameSuffixMatch bool, allAuthFilters []*model.HTTPExternalAuthFilter) []*envoy_config_route_v3.Route {
 	matchBackendMap := make(map[string][]model.HTTPRoute)
 	for _, r := range httpRoutes {
-		matchBackendMap[r.GetMatchKey()] = append(matchBackendMap[r.GetMatchKey()], r)
+		key := r.GetBackendAggregationKey()
+		matchBackendMap[key] = append(matchBackendMap[key], r)
 	}
 
 	routes := make([]*envoy_config_route_v3.Route, 0, len(matchBackendMap))
 	for _, r := range httpRoutes {
-		hRoutes, exists := matchBackendMap[r.GetMatchKey()]
+		key := r.GetBackendAggregationKey()
+		hRoutes, exists := matchBackendMap[key]
 		// if not exists, it means this route is already added to the routes
 		if !exists {
 			continue
@@ -284,7 +306,7 @@ func envoyHTTPSRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostName
 			TypedPerFilterConfig: getTypedPerFilterConfig(nil, allAuthFilters, r),
 		}
 		routes = append(routes, &route)
-		delete(matchBackendMap, r.GetMatchKey())
+		delete(matchBackendMap, key)
 	}
 	return routes
 }
@@ -292,12 +314,14 @@ func envoyHTTPSRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostName
 func envoyHTTPRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostNameSuffixMatch bool, listenerPort uint32, allAuthFilters []*model.HTTPExternalAuthFilter) []*envoy_config_route_v3.Route {
 	matchBackendMap := make(map[string][]model.HTTPRoute)
 	for _, r := range httpRoutes {
-		matchBackendMap[r.GetMatchKey()] = append(matchBackendMap[r.GetMatchKey()], r)
+		key := r.GetBackendAggregationKey()
+		matchBackendMap[key] = append(matchBackendMap[key], r)
 	}
 
 	routes := make([]*envoy_config_route_v3.Route, 0, len(matchBackendMap))
 	for _, r := range httpRoutes {
-		hRoutes, exists := matchBackendMap[r.GetMatchKey()]
+		key := r.GetBackendAggregationKey()
+		hRoutes, exists := matchBackendMap[key]
 		if !exists {
 			continue
 		}
@@ -309,6 +333,7 @@ func envoyHTTPRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostNameS
 		if len(backends) == 0 && hRoutes[0].RequestRedirect == nil {
 			noBackendRoute := envoyHTTPRouteNoBackend(hRoutes[0], hostnames, hostNameSuffixMatch, allAuthFilters)
 			routes = append(routes, noBackendRoute)
+			delete(matchBackendMap, key)
 			continue
 		}
 
@@ -344,7 +369,7 @@ func envoyHTTPRoutes(httpRoutes []model.HTTPRoute, hostnames []string, hostNameS
 			}
 		}
 		routes = append(routes, &route)
-		delete(matchBackendMap, r.GetMatchKey())
+		delete(matchBackendMap, key)
 	}
 	return routes
 }
@@ -647,8 +672,8 @@ func envoyHTTPRouteNoBackend(route model.HTTPRoute, hostnames []string, hostName
 }
 
 func getRouteMatch(hostnames []string, hostNameSuffixMatch bool, pathMatch model.StringMatch, headers []model.KeyValueMatch, query []model.KeyValueMatch, method *string) *envoy_config_route_v3.RouteMatch {
-	headerMatchers := getHeaderMatchers(hostnames, hostNameSuffixMatch, headers, method)
-	queryMatchers := getQueryMatchers(query)
+	headerMatchers := getHeaderMatchers(hostnames, hostNameSuffixMatch, sortedKeyValueMatches(headers), method)
+	queryMatchers := getQueryMatchers(sortedKeyValueMatches(query))
 
 	switch {
 	case pathMatch.Exact != "":
@@ -694,6 +719,14 @@ func getRouteMatch(hostnames []string, hostNameSuffixMatch bool, pathMatch model
 			QueryParameters: queryMatchers,
 		}
 	}
+}
+
+func sortedKeyValueMatches(matches []model.KeyValueMatch) []model.KeyValueMatch {
+	sorted := append([]model.KeyValueMatch(nil), matches...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].String() < sorted[j].String()
+	})
+	return sorted
 }
 
 func getQueryMatchers(query []model.KeyValueMatch) []*envoy_config_route_v3.QueryParameterMatcher {

@@ -111,7 +111,7 @@
    * - :spelling:ignore:`authentication.mutual.spire.install.agent.image`
      - SPIRE agent image
      - object
-     - ``{"digest":"sha256:f93996a9396ec4042a48042085c2abf1a0f8f0f3b339571e06ebfebbf94bb830","override":null,"pullPolicy":"Always","repository":"ghcr.io/spiffe/spire-agent","tag":"1.14.4","useDigest":true}``
+     - ``{"digest":"sha256:1d042e4040466686e0ee46f74981ff2167c86adfadca19b3835946f4d6047536","override":null,"pullPolicy":"Always","repository":"ghcr.io/spiffe/spire-agent","tag":"1.15.2","useDigest":true}``
    * - :spelling:ignore:`authentication.mutual.spire.install.agent.labels`
      - SPIRE agent labels
      - object
@@ -159,7 +159,7 @@
    * - :spelling:ignore:`authentication.mutual.spire.install.initImage`
      - init container image of SPIRE agent and server
      - object
-     - ``{"digest":"sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d","override":null,"pullPolicy":"Always","repository":"docker.io/library/busybox","tag":"1.38.0","useDigest":true}``
+     - ``{"digest":"sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616","override":null,"pullPolicy":"Always","repository":"docker.io/library/busybox","tag":"1.38.0","useDigest":true}``
    * - :spelling:ignore:`authentication.mutual.spire.install.namespace`
      - SPIRE namespace to install into
      - string
@@ -199,7 +199,7 @@
    * - :spelling:ignore:`authentication.mutual.spire.install.server.image`
      - SPIRE server image
      - object
-     - ``{"digest":"sha256:27c7d356768b8641c569745e1121328affeb4aaabe0c974d33ff92dddecf30ef","override":null,"pullPolicy":"Always","repository":"ghcr.io/spiffe/spire-server","tag":"1.14.4","useDigest":true}``
+     - ``{"digest":"sha256:aa74ef1be86bc8e0684007d84a4d9859d294384d842c30425048d73429f3216e","override":null,"pullPolicy":"Always","repository":"ghcr.io/spiffe/spire-server","tag":"1.15.2","useDigest":true}``
    * - :spelling:ignore:`authentication.mutual.spire.install.server.initContainers`
      - SPIRE server init containers
      - list
@@ -503,7 +503,7 @@
    * - :spelling:ignore:`certgen`
      - Configure certificate generation for Hubble integration. If hubble.tls.auto.method=cronJob, these values are used for the Kubernetes CronJob which will be scheduled regularly to (re)generate any certificates not provided manually.
      - object
-     - ``{"affinity":{},"annotations":{"cronJob":{},"job":{}},"cronJob":{"failedJobsHistoryLimit":1,"successfulJobsHistoryLimit":3},"enforceCAValidityThroughoutLeavesDuration":true,"extraVolumeMounts":[],"extraVolumes":[],"generateCA":true,"image":{"digest":"sha256:f0c656830e856d26b24b0e144df1f8b327d3b46748d76a630514111fc365b697","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/certgen","tag":"v0.4.1","useDigest":true},"nodeSelector":{},"podLabels":{},"priorityClassName":"","resources":{},"tolerations":[],"ttlSecondsAfterFinished":null}``
+     - ``{"affinity":{},"annotations":{"cronJob":{},"job":{}},"cronJob":{"failedJobsHistoryLimit":1,"successfulJobsHistoryLimit":3},"enforceCAValidityThroughoutLeavesDuration":true,"extraVolumeMounts":[],"extraVolumes":[],"generateCA":true,"image":{"digest":"sha256:6213a4c54a1f36e14a9280765f058aaa2017550c28bc122f5b09ad146fd0da2b","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/certgen","tag":"v0.4.9","useDigest":true},"nodeSelector":{},"podLabels":{},"priorityClassName":"","resources":{},"tolerations":[],"ttlSecondsAfterFinished":null}``
    * - :spelling:ignore:`certgen.affinity`
      - Affinity for certgen
      - object
@@ -650,6 +650,10 @@
      - ``[]``
    * - :spelling:ignore:`clustermesh.apiserver.extraEnv`
      - Additional clustermesh-apiserver environment variables.
+     - list
+     - ``[]``
+   * - :spelling:ignore:`clustermesh.apiserver.extraInitContainers`
+     - Additional init containers added to the clustermesh-apiserver Deployment.
      - list
      - ``[]``
    * - :spelling:ignore:`clustermesh.apiserver.extraVolumeMounts`
@@ -896,6 +900,10 @@
      - Optional port to use as the node port for apiserver access.
      - int
      - ``32379``
+   * - :spelling:ignore:`clustermesh.apiserver.service.port`
+     - Service port for the clustermesh-apiserver service.
+     - int
+     - ``2379``
    * - :spelling:ignore:`clustermesh.apiserver.service.type`
      - The type of service used for apiserver access.
      - string
@@ -944,6 +952,10 @@
      - X509Subject Full X509 name specification used when clustermesh.apiserver.tls.auto.method=certmanager. https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.X509Subject
      - object
      - ``{}``
+   * - :spelling:ignore:`clustermesh.apiserver.tls.disableDefaultVolumes`
+     - Disable the default TLS certificate volumes and mounts for clustermesh-apiserver (including KVStoreMesh), cilium-agent and cilium-operator, allowing you to provide your own via extraVolumes/extraVolumeMounts. This also disables mounting the clustermesh configuration, which then needs to be provided separately (likely at a different location).
+     - bool
+     - ``false``
    * - :spelling:ignore:`clustermesh.apiserver.tolerations`
      - Node tolerations for pod assignment on nodes with taints ref: https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
      - list
@@ -1369,7 +1381,7 @@
      - string
      - ``"cilium-ipsec-keys"``
    * - :spelling:ignore:`encryption.nodeEncryption`
-     - Enable encryption for pure node to node traffic. This option is only effective when encryption.type is set to "wireguard".
+     - Enable encryption for pure node to node traffic. This option is only effective when encryption.type is set to "wireguard". Deprecated: will be removed in v1.22.
      - bool
      - ``false``
    * - :spelling:ignore:`encryption.strictMode`
@@ -1683,7 +1695,7 @@
    * - :spelling:ignore:`envoy.image`
      - Envoy container image.
      - object
-     - ``{"digest":"sha256:abc439b70846a384b8d728b0bc42e5dd48bbbc456515a4cd989f3652d8986b43","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/cilium-envoy","tag":"v1.37.5-1782264709-cdc3744d2a0d37948ed88498195c637ece94c44b","useDigest":true}``
+     - ``{"digest":"sha256:4fb60b44dbc775cecad17eb5ba877c3893375d5aeb46486898a5d1cc1fd00208","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/cilium-envoy","tag":"v1.37.5-1784087459-5c6d365aae12510675d55f3576539472045d6b03","useDigest":true}``
    * - :spelling:ignore:`envoy.initContainers`
      - Init containers added to the cilium Envoy DaemonSet.
      - list
@@ -1888,6 +1900,10 @@
      - Timeout for the startup probe
      - int
      - ``5``
+   * - :spelling:ignore:`envoy.staticRuntimeConfig`
+     - Static runtime bootstrap config for envoy. ref: https://www.envoyproxy.io/docs/envoy/latest/configuration/operations/runtime#static-bootstrap
+     - object
+     - ``{}``
    * - :spelling:ignore:`envoy.streamIdleTimeoutDurationSeconds`
      - Set Envoy the amount of time that the connection manager will allow a stream to exist with no upstream or downstream activity. default 5 minutes
      - int
@@ -1909,7 +1925,7 @@
      - bool
      - ``true``
    * - :spelling:ignore:`envoy.xdsMode`
-     - xDS server operating mode for Envoy proxy configuration. Supported values are: "split" for the existing per-resource-type xDS, "ads" for the ADS (Aggregated Discovery Service) xDS, and "strict-ads" for ADS with strict snapshot cache behavior and generated snapshot consistency checks. Null value omits setting this option. Cilium Agent defaults missing option to "split" to keep upgrades in the legacy mode.
+     - xDS server operating mode for Envoy proxy configuration. Supported values are: "split" for the existing per-resource-type xDS, "delta-split" for incremental Delta xDS, "ads" for the ADS (Aggregated Discovery Service) xDS, and "strict-ads" for ADS with strict snapshot cache behavior and generated snapshot consistency checks. Null value omits setting this option. Cilium Agent defaults missing option to "split" to keep upgrades in the legacy mode.
      - string
      - ``ads`` for new 1.20+ installations; none when ``upgradeCompatibility`` is set below ``1.20``
    * - :spelling:ignore:`envoy.xffNumTrustedHopsL7PolicyEgress`
@@ -2288,6 +2304,10 @@
      - Additional hubble-relay environment variables.
      - list
      - ``[]``
+   * - :spelling:ignore:`hubble.relay.extraInitContainers`
+     - Additional init containers added to the hubble-relay Deployment.
+     - list
+     - ``[]``
    * - :spelling:ignore:`hubble.relay.extraVolumeMounts`
      - Additional hubble-relay volumeMounts.
      - list
@@ -2463,7 +2483,7 @@
    * - :spelling:ignore:`hubble.relay.tls`
      - TLS configuration for Hubble Relay
      - object
-     - ``{"client":{"cert":"","existingSecret":"","key":""},"server":{"cert":"","enabled":false,"existingSecret":"","extraDnsNames":[],"extraIpAddresses":[],"key":"","mtls":false,"relayName":"ui.hubble-relay.cilium.io"}}``
+     - ``{"client":{"cert":"","existingSecret":"","key":""},"disableDefaultVolumes":false,"server":{"cert":"","enabled":false,"existingSecret":"","extraDnsNames":[],"extraIpAddresses":[],"key":"","mtls":false,"relayName":"ui.hubble-relay.cilium.io"}}``
    * - :spelling:ignore:`hubble.relay.tls.client`
      - The hubble-relay client certificate and private key. This keypair is presented to Hubble server instances for mTLS authentication and is required when hubble.tls.enabled is true. These values need to be set manually if hubble.tls.auto.enabled is false.
      - object
@@ -2480,6 +2500,10 @@
      - base64 encoded PEM values for the Hubble relay client key (deprecated). Use existingSecret instead.
      - string
      - ``""``
+   * - :spelling:ignore:`hubble.relay.tls.disableDefaultVolumes`
+     - Disable the default TLS certificate volumes and mounts for Hubble Relay, allowing you to provide your own via extraVolumes/extraVolumeMounts.
+     - bool
+     - ``false``
    * - :spelling:ignore:`hubble.relay.tls.server`
      - The hubble-relay server certificate and private key
      - object
@@ -2527,7 +2551,7 @@
    * - :spelling:ignore:`hubble.tls`
      - TLS configuration for Hubble
      - object
-     - ``{"auto":{"certManagerIssuerRef":{},"certValidityDuration":365,"enabled":true,"method":"helm","privateKey":{},"schedule":"0 0 1 */4 *","subject":{}},"enabled":true,"server":{"cert":"","existingSecret":"","extraDnsNames":[],"extraIpAddresses":[],"key":""}}``
+     - ``{"auto":{"certManagerIssuerRef":{},"certValidityDuration":365,"enabled":true,"method":"helm","privateKey":{},"schedule":"0 0 1 */4 *","subject":{}},"disableDefaultVolumes":false,"enabled":true,"server":{"cert":"","existingSecret":"","extraDnsNames":[],"extraIpAddresses":[],"key":""}}``
    * - :spelling:ignore:`hubble.tls.auto`
      - Configure automatic TLS certificates generation.
      - object
@@ -2560,6 +2584,10 @@
      - X509Subject Full X509 name specification used when hubble.tls.auto.method=certmanager. https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.X509Subject
      - object
      - ``{}``
+   * - :spelling:ignore:`hubble.tls.disableDefaultVolumes`
+     - Disable the default TLS certificate volumes and mounts for the Hubble server, allowing you to provide your own via extraVolumes/extraVolumeMounts.
+     - bool
+     - ``false``
    * - :spelling:ignore:`hubble.tls.enabled`
      - Enable mutual TLS for listenAddress. Setting this value to false is highly discouraged as the Hubble API provides access to potentially sensitive network flow metadata and is exposed on the host network.
      - bool
@@ -2611,7 +2639,7 @@
    * - :spelling:ignore:`hubble.ui.backend.image`
      - Hubble-ui backend image.
      - object
-     - ``{"digest":"sha256:db1454e45dc39ca41fbf7cad31eec95d99e5b9949c39daaad0fa81ef29d56953","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/hubble-ui-backend","tag":"v0.13.3","useDigest":true}``
+     - ``{"digest":"sha256:fac0c300ae119274edca11fd89b1ad23c788792d8bc4ea2ba631c709e8d3c688","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/hubble-ui-backend","tag":"v0.13.5","useDigest":true}``
    * - :spelling:ignore:`hubble.ui.backend.resources`
      - Resource requests and limits for the 'backend' container of the 'hubble-ui' deployment.
      - object
@@ -2628,6 +2656,10 @@
      - Whether to enable the Hubble UI.
      - bool
      - ``false``
+   * - :spelling:ignore:`hubble.ui.extraInitContainers`
+     - Additional init containers added to the hubble-ui Deployment.
+     - list
+     - ``[]``
    * - :spelling:ignore:`hubble.ui.frontend.extraEnv`
      - Additional hubble-ui frontend environment variables.
      - list
@@ -2643,7 +2675,7 @@
    * - :spelling:ignore:`hubble.ui.frontend.image`
      - Hubble-ui frontend image.
      - object
-     - ``{"digest":"sha256:661d5de7050182d495c6497ff0b007a7a1e379648e60830dd68c4d78ae21761d","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/hubble-ui","tag":"v0.13.3","useDigest":true}``
+     - ``{"digest":"sha256:f7d514fc54d784ed6df9d58cf0e97648b143f92b766dd1780ed3fc845bd4c516","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/hubble-ui","tag":"v0.13.5","useDigest":true}``
    * - :spelling:ignore:`hubble.ui.frontend.resources`
      - Resource requests and limits for the 'frontend' container of the 'hubble-ui' deployment.
      - object
@@ -2656,6 +2688,14 @@
      - Controls server listener for ipv6
      - object
      - ``{"enabled":true}``
+   * - :spelling:ignore:`hubble.ui.httpRoute`
+     - hubble-ui GatewayAPI HTTPRoute configuration.
+     - object
+     - ``{"annotations":{},"enabled":false,"hostnames":["chart-example.local"],"labels":{},"parentRefs":[{"name":"cilium-gateway","namespace":"kube-system"}]}``
+   * - :spelling:ignore:`hubble.ui.httpRoute.parentRefs`
+     - parentRefs define which Gateways this HTTPRoute attaches to.
+     - list
+     - ``[{"name":"cilium-gateway","namespace":"kube-system"}]``
    * - :spelling:ignore:`hubble.ui.ingress`
      - hubble-ui ingress configuration.
      - object
@@ -2748,6 +2788,10 @@
      - base64 encoded PEM values for the Hubble UI client key (deprecated). Use existingSecret instead.
      - string
      - ``""``
+   * - :spelling:ignore:`hubble.ui.tls.disableDefaultVolumes`
+     - Disable the default TLS certificate volumes and mounts for Hubble UI, allowing you to provide your own via extraVolumes/extraVolumeMounts.
+     - bool
+     - ``false``
    * - :spelling:ignore:`hubble.ui.tmpVolume`
      - Configure temporary volume for hubble-ui
      - object
@@ -3244,6 +3288,10 @@
      - Derive the native routing CIDRs from the cluster-pool IPAM CIDRs when ipv4NativeRoutingCIDR / ipv6NativeRoutingCIDR are not explicitly set. Only effective with ipam.mode=cluster-pool and requires exactly one CIDR per enabled IP family in clusterPoolIPv4PodCIDRList / clusterPoolIPv6PodCIDRList.
      - bool
      - ``false``
+   * - :spelling:ignore:`networkDriver`
+     - Enable the Network Driver feature
+     - object
+     - ``{"enabled":false}``
    * - :spelling:ignore:`nodeIPAM.enabled`
      - Configure Node IPAM ref: https://docs.cilium.io/en/stable/network/node-ipam/
      - bool
@@ -3315,7 +3363,7 @@
    * - :spelling:ignore:`nodeinit.image`
      - node-init image.
      - object
-     - ``{"digest":"sha256:bf1944bbdfd073bbb2b8d9c5baa315267a552aec6942102f930d2a7aa7ddc0e1","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/startup-script","tag":"1773335249-e45b074","useDigest":true}``
+     - ``{"digest":"sha256:f99e2beda7324e93ba04d6240d9626a6b9ab023d7d56e3b029d3d9c823ce63ef","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/startup-script","tag":"1782916218-36ae25f","useDigest":true}``
    * - :spelling:ignore:`nodeinit.minReadySeconds`
      - Minimum number of seconds for which a newly created node-init pod should be ready before it is considered available.
      - int
@@ -3406,6 +3454,10 @@
      - ``[]``
    * - :spelling:ignore:`operator.extraHostPathMounts`
      - Additional cilium-operator hostPath mounts.
+     - list
+     - ``[]``
+   * - :spelling:ignore:`operator.extraInitContainers`
+     - Additional init containers added to the operator Deployment.
      - list
      - ``[]``
    * - :spelling:ignore:`operator.extraVolumeMounts`
@@ -3671,7 +3723,7 @@
    * - :spelling:ignore:`preflight.envoy.image`
      - Envoy pre-flight image.
      - object
-     - ``{"digest":"sha256:abc439b70846a384b8d728b0bc42e5dd48bbbc456515a4cd989f3652d8986b43","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/cilium-envoy","tag":"v1.37.5-1782264709-cdc3744d2a0d37948ed88498195c637ece94c44b","useDigest":true}``
+     - ``{"digest":"sha256:4fb60b44dbc775cecad17eb5ba877c3893375d5aeb46486898a5d1cc1fd00208","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/cilium-envoy","tag":"v1.37.5-1784087459-5c6d365aae12510675d55f3576539472045d6b03","useDigest":true}``
    * - :spelling:ignore:`preflight.extraEnv`
      - Additional preflight environment variables.
      - list

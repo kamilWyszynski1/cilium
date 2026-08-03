@@ -291,6 +291,7 @@ func initGatewayAPIController(params gatewayAPIParams) error {
 		params.Logger,
 		defaultControllerName,
 		installedOptionalKinds,
+		cfg.HostNetworkConfig.Enabled,
 	); err != nil {
 		return fmt.Errorf("failed to create gateway controller: %w", err)
 	}
@@ -322,14 +323,22 @@ func registerSecretSync(params secretSyncParams) secretsync.SecretSyncRegistrati
 	}
 
 	handler := NewSecretSyncHandler(params.CtrlRuntimeManager.GetClient(), params.Logger, defaultControllerName)
+	secretSyncRegistration := &secretsync.SecretSyncRegistration{
+		RefObject:            &gatewayv1.Gateway{},
+		RefObjectEnqueueFunc: handler.EnqueueTLSSecrets(),
+		RefObjectCheckFunc:   handler.IsReferencedByGateway,
+		SecretsNamespace:     params.GatewayApiConfig.GatewayAPISecretsNamespace,
+	}
+
+	if helpers.HasListenerSetSupport(params.CtrlRuntimeManager.GetScheme()) {
+		secretSyncRegistration.AdditionalWatches = append(secretSyncRegistration.AdditionalWatches, secretsync.AdditionalWatch{
+			RefObject:            &gatewayv1.ListenerSet{},
+			RefObjectEnqueueFunc: handler.EnqueueListenerSetTLSSecrets(),
+		})
+	}
 
 	return secretsync.SecretSyncRegistrationOut{
-		SecretSyncRegistration: &secretsync.SecretSyncRegistration{
-			RefObject:            &gatewayv1.Gateway{},
-			RefObjectEnqueueFunc: handler.EnqueueTLSSecrets(),
-			RefObjectCheckFunc:   handler.IsReferencedByGateway,
-			SecretsNamespace:     params.GatewayApiConfig.GatewayAPISecretsNamespace,
-		},
+		SecretSyncRegistration: secretSyncRegistration,
 		ConfigMapSyncRegistration: &secretsync.ConfigMapSyncRegistration{
 			RefObject:            &gatewayv1.BackendTLSPolicy{},
 			RefObjectEnqueueFunc: handler.EnqueueBackendTLSPolicyConfigMaps(),
@@ -378,30 +387,6 @@ func isTransientError(err error) bool {
 	return false
 }
 
-func checkCRD(ctx context.Context, clientset k8sClient.Clientset, gvk schema.GroupVersionKind) error {
-	if !clientset.IsEnabled() {
-		return nil
-	}
-
-	crd, err := clientset.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, gvk.GroupKind().String(), metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	found := false
-	for _, v := range crd.Spec.Versions {
-		if v.Name == gvk.Version {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("CRD %q does not have version %q", gvk.GroupKind().String(), gvk.Version)
-	}
-
-	return nil
-}
-
 // checkCRDs checks if required and optional CRDs are present in the cluster,
 // returns an error if the required CRDs are not installed, and returns the
 // schema.GroupVersionKind of any optional CRDs that are installed.
@@ -410,13 +395,13 @@ func checkCRDs(ctx context.Context, clientset k8sClient.Clientset, logger *slog.
 	var presentOptionalGVKs []schema.GroupVersionKind
 
 	for _, gvk := range requiredGVKs {
-		if err := checkCRD(ctx, clientset, gvk); err != nil {
+		if err := k8sClient.CheckCRD(ctx, clientset, gvk); err != nil {
 			res = errors.Join(res, err)
 		}
 	}
 
 	for _, optionalGVK := range optionalGVKs {
-		if err := checkCRD(ctx, clientset, optionalGVK); err != nil {
+		if err := k8sClient.CheckCRD(ctx, clientset, optionalGVK); err != nil {
 			logger.DebugContext(ctx, "CRD is not present, will not handle it", logfields.OptionalGVK, optionalGVK)
 			continue
 		}
@@ -430,12 +415,19 @@ func checkCRDs(ctx context.Context, clientset k8sClient.Clientset, logger *slog.
 
 // registerReconcilers registers Gateway API reconcilers to the controller-runtime library manager.
 // optionalKinds are previously autodetected based on what CRDs are present in the cluster.
-func registerReconcilers(mgr ctrlRuntime.Manager, translator translation.Translator, logger *slog.Logger, controllerName string, installedOptionalCRDs []schema.GroupVersionKind) error {
+func registerReconcilers(
+	mgr ctrlRuntime.Manager,
+	translator translation.Translator,
+	logger *slog.Logger,
+	controllerName string,
+	installedOptionalCRDs []schema.GroupVersionKind,
+	hostNetworkEnabled bool,
+) error {
 	requiredReconcilers := []interface {
 		SetupWithManager(mgr ctrlRuntime.Manager) error
 	}{
 		newGatewayClassReconciler(mgr, logger, controllerName),
-		newGatewayReconciler(mgr, translator, logger, controllerName),
+		newGatewayReconciler(mgr, translator, logger, controllerName, hostNetworkEnabled),
 		newGammaReconciler(mgr, translator, logger, controllerName),
 		newGatewayClassConfigReconciler(mgr, logger),
 		newEndpointSliceReconciler(mgr, logger),

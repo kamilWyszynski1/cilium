@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"regexp"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -82,7 +83,7 @@ func (g *GRPCRouteInput) GetContext() context.Context {
 }
 
 func (g *GRPCRouteInput) GetGVK() schema.GroupVersionKind {
-	return gatewayv1.SchemeGroupVersion.WithKind("GRPCRoute")
+	return helpers.GatewayV1GVK("GRPCRoute")
 }
 
 func (g *GRPCRouteInput) GetGrants() []gatewayv1.ReferenceGrant {
@@ -147,18 +148,6 @@ func (g *GRPCRouteInput) SetParentCondition(ref gatewayv1beta1.ParentReference, 
 	})
 }
 
-func (g *GRPCRouteInput) SetAllParentCondition(condition metav1.Condition) {
-	// fill in the condition
-	condition.LastTransitionTime = metav1.NewTime(time.Now())
-	condition.ObservedGeneration = g.GRPCRoute.GetGeneration()
-
-	for _, parent := range g.GRPCRoute.Spec.ParentRefs {
-		g.mergeStatusConditions(parent, []metav1.Condition{
-			condition,
-		})
-	}
-}
-
 func (g *GRPCRouteInput) Log() *slog.Logger {
 	return g.Logger
 }
@@ -184,4 +173,34 @@ func (g *GRPCRouteInput) mergeStatusConditions(parentRef gatewayv1.ParentReferen
 		ControllerName: gatewayv1.GatewayController(g.ControllerName),
 		Conditions:     updates,
 	})
+}
+
+func (g *GRPCRouteInput) ValidateMatchRegexps() (metav1.Condition, bool) {
+	for _, rule := range g.GRPCRoute.Spec.Rules {
+		for _, match := range rule.Matches {
+			if methodMatch := match.Method; methodMatch != nil && methodMatch.Type != nil &&
+				*methodMatch.Type == gatewayv1.GRPCMethodMatchRegularExpression {
+				if methodMatch.Service != nil {
+					if _, err := regexp.Compile(*methodMatch.Service); err != nil {
+						return invalidRegexCondition("method.service", err), true
+					}
+				}
+
+				if methodMatch.Method != nil {
+					if _, err := regexp.Compile(*methodMatch.Method); err != nil {
+						return invalidRegexCondition("method.method", err), true
+					}
+				}
+			}
+
+			for _, headerMatch := range match.Headers {
+				if headerMatch.Type != nil && *headerMatch.Type == gatewayv1.GRPCHeaderMatchRegularExpression {
+					if _, err := regexp.Compile(headerMatch.Value); err != nil {
+						return invalidRegexCondition("header", err), true
+					}
+				}
+			}
+		}
+	}
+	return metav1.Condition{}, false
 }

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 
 	"github.com/cilium/hive/cell"
-	"github.com/cilium/stream"
 	"github.com/spf13/pflag"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
@@ -32,7 +31,6 @@ var Cell = cell.Module(
 	cell.Provide(newPolicyRepo),
 	cell.Provide(newPolicyUpdater),
 	cell.Provide(newPolicyImporter),
-	cell.Provide(newPolicyCacheOut),
 	cell.Provide(newIdentityUpdater),
 	cell.Provide(newIPCacher),
 	cell.Config(defaultConfig),
@@ -72,13 +70,15 @@ type policyRepoParams struct {
 
 func newPolicyRepo(params policyRepoParams) policy.PolicyRepository {
 	// Must be done before calling policy.NewPolicyRepository() below.
-	num := identity.InitStaticIdentities(params.DaemonConfig.K8sNamespace, params.ClusterInfo, params.Config.EnableWellKnownIdentities)
-	metrics.Identity.WithLabelValues(identity.WellKnownIdentityType).Add(float64(num))
-	identity.WellKnown.ForEach(func(i *identity.Identity) {
-		for labelSource := range i.Labels.CollectSources() {
-			metrics.IdentityLabelSources.WithLabelValues(labelSource).Inc()
-		}
-	})
+	if params.Config.EnableWellKnownIdentities {
+		num := identity.InitWellKnownIdentities(params.DaemonConfig.K8sNamespace, params.ClusterInfo)
+		metrics.Identity.WithLabelValues(identity.WellKnownIdentityType).Add(float64(num))
+		identity.WellKnown.ForEach(func(i *identity.Identity) {
+			for labelSource := range i.Labels.CollectSources() {
+				metrics.IdentityLabelSources.WithLabelValues(labelSource).Inc()
+			}
+		})
+	}
 
 	policyapi.InitEntities(params.ClusterInfo.Name)
 
@@ -102,10 +102,6 @@ func newPolicyRepo(params policyRepoParams) policy.PolicyRepository {
 	})
 
 	return policyRepo
-}
-
-func newPolicyCacheOut(r policy.PolicyRepository) stream.Observable[policy.PolicyCacheChange] {
-	return r.PolicyCacheObservable()
 }
 
 type policyUpdaterParams struct {

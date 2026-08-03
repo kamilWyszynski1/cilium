@@ -239,6 +239,7 @@ func InitGlobalFlags(logger *slog.Logger, cmd *cobra.Command, vp *viper.Viper) {
 	option.BindEnv(vp, option.IPv6MCastDevice)
 
 	flags.Bool(option.EncryptNode, defaults.EncryptNode, "Enables encrypting traffic from non-Cilium pods and host networking (only supported with WireGuard, beta)")
+	flags.MarkDeprecated(option.EncryptNode, "This option is obsolete and will be removed in v1.22")
 	option.BindEnv(vp, option.EncryptNode)
 
 	flags.StringSlice(option.IPv4PodSubnets, []string{}, "List of IPv4 pod subnets to preconfigure for encryption")
@@ -1088,7 +1089,6 @@ func initEnv(logger *slog.Logger, vp *viper.Viper) {
 	}
 
 	if option.Config.LocalRouterIPv4 != "" || option.Config.LocalRouterIPv6 != "" {
-		// TODO(weil0ng): add a proper check for ipam in PR# 15429.
 		if !option.Config.RequiresNativeRouting() {
 			logging.Fatal(logger, fmt.Sprintf("%s and %s require native or hybrid routing mode.", option.LocalRouterIPv4, option.LocalRouterIPv6))
 		}

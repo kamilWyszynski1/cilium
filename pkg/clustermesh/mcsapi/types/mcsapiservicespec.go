@@ -28,6 +28,21 @@ var (
 	ServiceExportStorePrefix = kvstore.JoinKey(kvstore.BaseKeyPrefix, "state", "serviceexports", "v1")
 )
 
+// CheckLocalSvcValidForExport checks if the local service is valid for export.
+// The logic here MUST be kept up to date with the logic in CheckLocalSlimSvcValidForExport.
+func CheckLocalSvcValidForExport(localSvc *corev1.Service) (bool, mcsapiv1beta1.ServiceExportConditionReason, string) {
+	if localSvc.Spec.Type == corev1.ServiceTypeExternalName {
+		return false, mcsapiv1beta1.ServiceExportReasonInvalidServiceType, "Service type ExternalName is not supported"
+	}
+	return true, "", ""
+}
+
+// CheckLocalSlimSvcValidForExport checks if the local service is valid for export.
+// The logic here MUST be kept up to date with the logic in CheckLocalSvcValidForExport.
+func CheckLocalSlimSvcValidForExport(localSvc *slim_corev1.Service) bool {
+	return localSvc.Spec.Type != slim_corev1.ServiceTypeExternalName
+}
+
 type MCSAPIServiceSpec struct {
 	// Cluster is the cluster name the service is configured in
 	Cluster string `json:"cluster"`
@@ -43,14 +58,6 @@ type MCSAPIServiceSpec struct {
 
 	// Labels contains the exported labels
 	Labels map[string]string `json:"labels,omitempty"`
-
-	// LegacyLabels contains the exported labels.
-	// Deprecated: Use Labels instead, this is kept for backward compatibility
-	LegacyLabels map[string]string `json:"Labels,omitempty"`
-
-	// LegacyAnnotations contains the exported annotations.
-	// Deprecated: Use Annotations instead, this is kept for backward compatibility
-	LegacyAnnotations map[string]string `json:"Annotations,omitempty"`
 
 	// ExportCreationTimestamp is the timestamp representing when the
 	// ServiceExport object was created. It is used for conflict resolution.
@@ -108,9 +115,6 @@ func (s *MCSAPIServiceSpec) NamespacedName() types.NamespacedName {
 
 // Marshal returns the MCS-API Service Spec object as JSON byte slice
 func (s *MCSAPIServiceSpec) Marshal() ([]byte, error) {
-	// Populate legacy fields for forward compatibility
-	s.LegacyAnnotations = s.Annotations
-	s.LegacyLabels = s.Labels
 	return json.Marshal(s)
 }
 
@@ -121,16 +125,6 @@ func (s *MCSAPIServiceSpec) Unmarshal(_ string, data []byte) error {
 	if err := json.Unmarshal(data, &newMCSAPIServiceSpec); err != nil {
 		return err
 	}
-
-	// Handle backward compatibility of old annotations/labels fields
-	if len(newMCSAPIServiceSpec.Annotations) == 0 {
-		newMCSAPIServiceSpec.Annotations = newMCSAPIServiceSpec.LegacyAnnotations
-	}
-	if len(newMCSAPIServiceSpec.Labels) == 0 {
-		newMCSAPIServiceSpec.Labels = newMCSAPIServiceSpec.LegacyLabels
-	}
-	newMCSAPIServiceSpec.LegacyAnnotations = nil
-	newMCSAPIServiceSpec.LegacyLabels = nil
 
 	if err := newMCSAPIServiceSpec.validate(); err != nil {
 		return err

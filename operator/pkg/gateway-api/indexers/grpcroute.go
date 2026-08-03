@@ -101,8 +101,64 @@ func GenerateIndexerGRPCRoutebyBackendService(c client.Client, logger *slog.Logg
 					}.String(),
 				)
 			}
+			for _, f := range rule.Filters {
+				if f.Type != gatewayv1.GRPCRouteFilterRequestMirror || f.RequestMirror == nil {
+					continue
+				}
+				namespace := helpers.NamespaceDerefOr(f.RequestMirror.BackendRef.Namespace, route.Namespace)
+				backendServiceName, err := helpers.GetBackendServiceName(c, namespace, f.RequestMirror.BackendRef)
+				if err != nil {
+					logger.Error("Failed to get request mirror backend service name",
+						logfields.LogSubsys, logfields.GRPCRoute,
+						logfields.Resource, client.ObjectKeyFromObject(rawObj),
+						logfields.Error, err)
+					continue
+				}
+				backendServices = append(backendServices,
+					types.NamespacedName{
+						Namespace: namespace,
+						Name:      backendServiceName,
+					}.String(),
+				)
+			}
 		}
 
 		return backendServices
 	}
+}
+
+// IndexGRPCRouteByBackendServiceImport is a client.IndexerFunc that takes a single GRPCRoute and
+// returns all referenced backend ServiceImport full names (`namespace/name`) to add to the relevant index.
+func IndexGRPCRouteByBackendServiceImport(rawObj client.Object) []string {
+	route, ok := rawObj.(*gatewayv1.GRPCRoute)
+	if !ok {
+		return nil
+	}
+	var backendServiceImports []string
+
+	for _, rule := range route.Spec.Rules {
+		for _, backend := range rule.BackendRefs {
+			if !helpers.IsServiceImport(backend.BackendObjectReference) {
+				continue
+			}
+			backendServiceImports = append(backendServiceImports,
+				types.NamespacedName{
+					Namespace: helpers.NamespaceDerefOr(backend.Namespace, route.Namespace),
+					Name:      string(backend.Name),
+				}.String(),
+			)
+		}
+		for _, f := range rule.Filters {
+			if f.Type != gatewayv1.GRPCRouteFilterRequestMirror || f.RequestMirror == nil || !helpers.IsServiceImport(f.RequestMirror.BackendRef) {
+				continue
+			}
+			backendServiceImports = append(backendServiceImports,
+				types.NamespacedName{
+					Namespace: helpers.NamespaceDerefOr(f.RequestMirror.BackendRef.Namespace, route.Namespace),
+					Name:      string(f.RequestMirror.BackendRef.Name),
+				}.String(),
+			)
+		}
+	}
+	return backendServiceImports
 }

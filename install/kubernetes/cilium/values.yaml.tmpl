@@ -1166,7 +1166,7 @@ encryption:
   # -- Encryption method. Can be one of ipsec, wireguard or ztunnel.
   type: ipsec
   # -- Enable encryption for pure node to node traffic.
-  # This option is only effective when encryption.type is set to "wireguard".
+  # This option is only effective when encryption.type is set to "wireguard". Deprecated: will be removed in v1.22.
   nodeEncryption: false
   # -- Configure the Encryption Pod2Pod strict mode.
   strictMode:
@@ -1541,6 +1541,9 @@ hubble:
           # This option has no effect when TLS is disabled.
           enabled: false
           useSecret: false
+          # @schema
+          # type: [null, string]
+          # @schema
           # -- Name of the ConfigMap containing the CA to validate client certificates against.
           # If mTLS is enabled and this is unspecified, it will default to the
           # same CA used for Hubble metrics server certificates.
@@ -1706,6 +1709,9 @@ hubble:
     # highly discouraged as the Hubble API provides access to potentially
     # sensitive network flow metadata and is exposed on the host network.
     enabled: true
+    # -- Disable the default TLS certificate volumes and mounts for the Hubble
+    # server, allowing you to provide your own via extraVolumes/extraVolumeMounts.
+    disableDefaultVolumes: false
     # -- Configure automatic TLS certificates generation.
     auto:
       # -- Auto-generate certificates.
@@ -1858,6 +1864,8 @@ hubble:
     extraVolumes: []
     # -- Additional hubble-relay volumeMounts.
     extraVolumeMounts: []
+    # -- Additional init containers added to the hubble-relay Deployment.
+    extraInitContainers: []
     # -- hubble-relay pod security context
     podSecurityContext:
       fsGroup: 65532
@@ -1887,6 +1895,9 @@ hubble:
     listenPort: "4245"
     # -- TLS configuration for Hubble Relay
     tls:
+      # -- Disable the default TLS certificate volumes and mounts for Hubble Relay,
+      # allowing you to provide your own via extraVolumes/extraVolumeMounts.
+      disableDefaultVolumes: false
       # -- The hubble-relay client certificate and private key.
       # This keypair is presented to Hubble server instances for mTLS
       # authentication and is required when hubble.tls.enabled is true.
@@ -2041,7 +2052,12 @@ hubble:
         #           path: hubble-relay-ca.crt
     # -- Roll out Hubble-ui pods automatically when configmap is updated.
     rollOutPods: false
+    # -- Additional init containers added to the hubble-ui Deployment.
+    extraInitContainers: []
     tls:
+      # -- Disable the default TLS certificate volumes and mounts for Hubble UI,
+      # allowing you to provide your own via extraVolumes/extraVolumeMounts.
+      disableDefaultVolumes: false
       client:
         # -- Name of the Secret containing the client certificate and key for Hubble UI
         # If specified, cert and key are ignored.
@@ -2214,6 +2230,18 @@ hubble:
       #  - secretName: chart-example-tls
       #    hosts:
       #      - chart-example.local
+    # -- hubble-ui GatewayAPI HTTPRoute configuration.
+    httpRoute:
+      enabled: false
+      annotations: {}
+      labels: {}
+      # -- parentRefs define which Gateways this HTTPRoute attaches to.
+      parentRefs:
+        - name: cilium-gateway
+          namespace: kube-system
+          # sectionName: http
+      hostnames:
+        - chart-example.local
 
     # -- Configure temporary volume for hubble-ui
     tmpVolume: {}
@@ -2753,10 +2781,11 @@ envoy:
   # @schema
   # oneOf:
   # - type: [null]
-  # - enum: ["split", "ads", "strict-ads"]
+  # - enum: ["split", "delta-split", "ads", "strict-ads"]
   # @schema
   # -- xDS server operating mode for Envoy proxy configuration. Supported
   # values are: "split" for the existing per-resource-type xDS,
+  # "delta-split" for incremental Delta xDS,
   # "ads" for the ADS (Aggregated Discovery Service) xDS, and
   # "strict-ads" for ADS with strict snapshot cache behavior and generated
   # snapshot consistency checks. Null value omits setting this option.
@@ -2854,6 +2883,12 @@ envoy:
   policyRestoreTimeoutDuration: null
   # -- Time in seconds to block Envoy worker thread while an upstream HTTP connection is closing. If set to 0, the connection is closed immediately (with TCP RST). If set to -1, the connection is closed asynchronously in the background.
   httpUpstreamLingerTimeout: null
+  # -- Static runtime bootstrap config for envoy.
+  # ref: https://www.envoyproxy.io/docs/envoy/latest/configuration/operations/runtime#static-bootstrap
+  staticRuntimeConfig: {}
+  #   re2.max_program_size.error_level: 256
+  #   re2.max_program_size.warn_level: 128
+
   # -- Envoy container image.
   image:
     # @schema
@@ -3352,6 +3387,8 @@ operator:
   extraVolumes: []
   # -- Additional cilium-operator volumeMounts.
   extraVolumeMounts: []
+  # -- Additional init containers added to the operator Deployment.
+  extraInitContainers: []
   # -- Annotations to be added to all top-level cilium-operator objects (resources under templates/cilium-operator)
   annotations: {}
   # -- HostNetwork setting
@@ -4004,6 +4041,8 @@ clustermesh:
       type: NodePort
       # -- Optional port to use as the node port for apiserver access.
       nodePort: 32379
+      # -- Service port for the clustermesh-apiserver service.
+      port: 2379
       # -- Annotations for the clustermesh-apiserver service.
       # Example annotations to configure an internal load balancer on different cloud providers:
       # * AKS: service.beta.kubernetes.io/azure-load-balancer-internal: "true"
@@ -4072,6 +4111,8 @@ clustermesh:
     extraVolumes: []
     # -- Additional clustermesh-apiserver volumeMounts.
     extraVolumeMounts: []
+    # -- Additional init containers added to the clustermesh-apiserver Deployment.
+    extraInitContainers: []
     # -- Security context to be added to clustermesh-apiserver containers
     securityContext:
       allowPrivilegeEscalation: false
@@ -4156,6 +4197,13 @@ clustermesh:
     # -- The priority class to use for clustermesh-apiserver
     priorityClassName: ""
     tls:
+      # -- Disable the default TLS certificate volumes and mounts for
+      # clustermesh-apiserver (including KVStoreMesh), cilium-agent and
+      # cilium-operator, allowing you to provide your own via
+      # extraVolumes/extraVolumeMounts. This also disables mounting the
+      # clustermesh configuration, which then needs to be provided
+      # separately (likely at a different location).
+      disableDefaultVolumes: false
       # -- Configure the clustermesh authentication mode.
       # Supported values:
       # - legacy:     All clusters access remote clustermesh instances with the same
@@ -4405,6 +4453,9 @@ authentication:
   # Configuration for Cilium's service-to-service mutual authentication using TLS handshakes.
   # Note that this is not full mTLS support without also enabling encryption of some form.
   # Current encryption options are WireGuard or IPsec, configured in encryption block above.
+  #
+  # Deprecated as of Cilium v1.20, this feature will be removed in Cilium v1.21.
+  # See https://github.com/cilium/cilium/issues/47132 for details.
   mutual:
     # -- Port on the agent where mutual authentication handshakes between agents will be performed
     port: 4250
@@ -4629,3 +4680,6 @@ standaloneDnsProxy:
     digest: "${STANDALONE_DNS_PROXY_DIGEST}"
     useDigest: ${USE_DIGESTS}
     pullPolicy: "${PULL_POLICY}"
+# -- Enable the Network Driver feature
+networkDriver:
+  enabled: false

@@ -1154,7 +1154,7 @@ encryption:
   # -- Encryption method. Can be one of ipsec, wireguard or ztunnel.
   type: ipsec
   # -- Enable encryption for pure node to node traffic.
-  # This option is only effective when encryption.type is set to "wireguard".
+  # This option is only effective when encryption.type is set to "wireguard". Deprecated: will be removed in v1.22.
   nodeEncryption: false
   # -- Configure the Encryption Pod2Pod strict mode.
   strictMode:
@@ -1407,8 +1407,8 @@ certgen:
     # @schema
     override: ~
     repository: "quay.io/cilium/certgen"
-    tag: "v0.4.1"
-    digest: "sha256:f0c656830e856d26b24b0e144df1f8b327d3b46748d76a630514111fc365b697"
+    tag: "v0.4.9"
+    digest: "sha256:6213a4c54a1f36e14a9280765f058aaa2017550c28bc122f5b09ad146fd0da2b"
     useDigest: true
     pullPolicy: "Always"
   # @schema
@@ -1524,6 +1524,9 @@ hubble:
           # This option has no effect when TLS is disabled.
           enabled: false
           useSecret: false
+          # @schema
+          # type: [null, string]
+          # @schema
           # -- Name of the ConfigMap containing the CA to validate client certificates against.
           # If mTLS is enabled and this is unspecified, it will default to the
           # same CA used for Hubble metrics server certificates.
@@ -1689,6 +1692,9 @@ hubble:
     # highly discouraged as the Hubble API provides access to potentially
     # sensitive network flow metadata and is exposed on the host network.
     enabled: true
+    # -- Disable the default TLS certificate volumes and mounts for the Hubble
+    # server, allowing you to provide your own via extraVolumes/extraVolumeMounts.
+    disableDefaultVolumes: false
     # -- Configure automatic TLS certificates generation.
     auto:
       # -- Auto-generate certificates.
@@ -1841,6 +1847,8 @@ hubble:
     extraVolumes: []
     # -- Additional hubble-relay volumeMounts.
     extraVolumeMounts: []
+    # -- Additional init containers added to the hubble-relay Deployment.
+    extraInitContainers: []
     # -- hubble-relay pod security context
     podSecurityContext:
       fsGroup: 65532
@@ -1870,6 +1878,9 @@ hubble:
     listenPort: "4245"
     # -- TLS configuration for Hubble Relay
     tls:
+      # -- Disable the default TLS certificate volumes and mounts for Hubble Relay,
+      # allowing you to provide your own via extraVolumes/extraVolumeMounts.
+      disableDefaultVolumes: false
       # -- The hubble-relay client certificate and private key.
       # This keypair is presented to Hubble server instances for mTLS
       # authentication and is required when hubble.tls.enabled is true.
@@ -2024,7 +2035,12 @@ hubble:
         #           path: hubble-relay-ca.crt
     # -- Roll out Hubble-ui pods automatically when configmap is updated.
     rollOutPods: false
+    # -- Additional init containers added to the hubble-ui Deployment.
+    extraInitContainers: []
     tls:
+      # -- Disable the default TLS certificate volumes and mounts for Hubble UI,
+      # allowing you to provide your own via extraVolumes/extraVolumeMounts.
+      disableDefaultVolumes: false
       client:
         # -- Name of the Secret containing the client certificate and key for Hubble UI
         # If specified, cert and key are ignored.
@@ -2043,8 +2059,8 @@ hubble:
         # @schema
         override: ~
         repository: "quay.io/cilium/hubble-ui-backend"
-        tag: "v0.13.3"
-        digest: "sha256:db1454e45dc39ca41fbf7cad31eec95d99e5b9949c39daaad0fa81ef29d56953"
+        tag: "v0.13.5"
+        digest: "sha256:fac0c300ae119274edca11fd89b1ad23c788792d8bc4ea2ba631c709e8d3c688"
         useDigest: true
         pullPolicy: "Always"
       # -- Hubble-ui backend security context.
@@ -2076,8 +2092,8 @@ hubble:
         # @schema
         override: ~
         repository: "quay.io/cilium/hubble-ui"
-        tag: "v0.13.3"
-        digest: "sha256:661d5de7050182d495c6497ff0b007a7a1e379648e60830dd68c4d78ae21761d"
+        tag: "v0.13.5"
+        digest: "sha256:f7d514fc54d784ed6df9d58cf0e97648b143f92b766dd1780ed3fc845bd4c516"
         useDigest: true
         pullPolicy: "Always"
       # -- Hubble-ui frontend security context.
@@ -2197,6 +2213,18 @@ hubble:
       #  - secretName: chart-example-tls
       #    hosts:
       #      - chart-example.local
+    # -- hubble-ui GatewayAPI HTTPRoute configuration.
+    httpRoute:
+      enabled: false
+      annotations: {}
+      labels: {}
+      # -- parentRefs define which Gateways this HTTPRoute attaches to.
+      parentRefs:
+        - name: cilium-gateway
+          namespace: kube-system
+          # sectionName: http
+      hostnames:
+        - chart-example.local
     # -- Configure temporary volume for hubble-ui
     tmpVolume: {}
     # emptyDir:
@@ -2722,10 +2750,11 @@ envoy:
   # @schema
   # oneOf:
   # - type: [null]
-  # - enum: ["split", "ads", "strict-ads"]
+  # - enum: ["split", "delta-split", "ads", "strict-ads"]
   # @schema
   # -- xDS server operating mode for Envoy proxy configuration. Supported
   # values are: "split" for the existing per-resource-type xDS,
+  # "delta-split" for incremental Delta xDS,
   # "ads" for the ADS (Aggregated Discovery Service) xDS, and
   # "strict-ads" for ADS with strict snapshot cache behavior and generated
   # snapshot consistency checks. Null value omits setting this option.
@@ -2823,6 +2852,12 @@ envoy:
   policyRestoreTimeoutDuration: null
   # -- Time in seconds to block Envoy worker thread while an upstream HTTP connection is closing. If set to 0, the connection is closed immediately (with TCP RST). If set to -1, the connection is closed asynchronously in the background.
   httpUpstreamLingerTimeout: null
+  # -- Static runtime bootstrap config for envoy.
+  # ref: https://www.envoyproxy.io/docs/envoy/latest/configuration/operations/runtime#static-bootstrap
+  staticRuntimeConfig: {}
+  #   re2.max_program_size.error_level: 256
+  #   re2.max_program_size.warn_level: 128
+
   # -- Envoy container image.
   image:
     # @schema
@@ -2830,9 +2865,9 @@ envoy:
     # @schema
     override: ~
     repository: "quay.io/cilium/cilium-envoy"
-    tag: "v1.37.5-1782264709-cdc3744d2a0d37948ed88498195c637ece94c44b"
+    tag: "v1.37.5-1784087459-5c6d365aae12510675d55f3576539472045d6b03"
     pullPolicy: "Always"
-    digest: "sha256:abc439b70846a384b8d728b0bc42e5dd48bbbc456515a4cd989f3652d8986b43"
+    digest: "sha256:4fb60b44dbc775cecad17eb5ba877c3893375d5aeb46486898a5d1cc1fd00208"
     useDigest: true
   # -- Init containers added to the cilium Envoy DaemonSet.
   initContainers: []
@@ -3318,6 +3353,8 @@ operator:
   extraVolumes: []
   # -- Additional cilium-operator volumeMounts.
   extraVolumeMounts: []
+  # -- Additional init containers added to the operator Deployment.
+  extraInitContainers: []
   # -- Annotations to be added to all top-level cilium-operator objects (resources under templates/cilium-operator)
   annotations: {}
   # -- HostNetwork setting
@@ -3483,8 +3520,8 @@ nodeinit:
     # @schema
     override: ~
     repository: "quay.io/cilium/startup-script"
-    tag: "1773335249-e45b074"
-    digest: "sha256:bf1944bbdfd073bbb2b8d9c5baa315267a552aec6942102f930d2a7aa7ddc0e1"
+    tag: "1782916218-36ae25f"
+    digest: "sha256:f99e2beda7324e93ba04d6240d9626a6b9ab023d7d56e3b029d3d9c823ce63ef"
     useDigest: true
     pullPolicy: "Always"
   # -- The priority class to use for the nodeinit pod.
@@ -3590,9 +3627,9 @@ preflight:
       # @schema
       override: ~
       repository: "quay.io/cilium/cilium-envoy"
-      tag: "v1.37.5-1782264709-cdc3744d2a0d37948ed88498195c637ece94c44b"
+      tag: "v1.37.5-1784087459-5c6d365aae12510675d55f3576539472045d6b03"
       pullPolicy: "Always"
-      digest: "sha256:abc439b70846a384b8d728b0bc42e5dd48bbbc456515a4cd989f3652d8986b43"
+      digest: "sha256:4fb60b44dbc775cecad17eb5ba877c3893375d5aeb46486898a5d1cc1fd00208"
       useDigest: true
   # -- The priority class to use for the preflight pod.
   priorityClassName: ""
@@ -3963,6 +4000,8 @@ clustermesh:
       type: NodePort
       # -- Optional port to use as the node port for apiserver access.
       nodePort: 32379
+      # -- Service port for the clustermesh-apiserver service.
+      port: 2379
       # -- Annotations for the clustermesh-apiserver service.
       # Example annotations to configure an internal load balancer on different cloud providers:
       # * AKS: service.beta.kubernetes.io/azure-load-balancer-internal: "true"
@@ -4031,6 +4070,8 @@ clustermesh:
     extraVolumes: []
     # -- Additional clustermesh-apiserver volumeMounts.
     extraVolumeMounts: []
+    # -- Additional init containers added to the clustermesh-apiserver Deployment.
+    extraInitContainers: []
     # -- Security context to be added to clustermesh-apiserver containers
     securityContext:
       allowPrivilegeEscalation: false
@@ -4115,6 +4156,13 @@ clustermesh:
     # -- The priority class to use for clustermesh-apiserver
     priorityClassName: ""
     tls:
+      # -- Disable the default TLS certificate volumes and mounts for
+      # clustermesh-apiserver (including KVStoreMesh), cilium-agent and
+      # cilium-operator, allowing you to provide your own via
+      # extraVolumes/extraVolumeMounts. This also disables mounting the
+      # clustermesh configuration, which then needs to be provided
+      # separately (likely at a different location).
+      disableDefaultVolumes: false
       # -- Configure the clustermesh authentication mode.
       # Supported values:
       # - legacy:     All clusters access remote clustermesh instances with the same
@@ -4359,6 +4407,9 @@ authentication:
   # Configuration for Cilium's service-to-service mutual authentication using TLS handshakes.
   # Note that this is not full mTLS support without also enabling encryption of some form.
   # Current encryption options are WireGuard or IPsec, configured in encryption block above.
+  #
+  # Deprecated as of Cilium v1.20, this feature will be removed in Cilium v1.21.
+  # See https://github.com/cilium/cilium/issues/47132 for details.
   mutual:
     # -- Port on the agent where mutual authentication handshakes between agents will be performed
     port: 4250
@@ -4387,7 +4438,7 @@ authentication:
           override: ~
           repository: "docker.io/library/busybox"
           tag: "1.38.0"
-          digest: "sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d"
+          digest: "sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616"
           useDigest: true
           pullPolicy: "Always"
         # SPIRE agent configuration
@@ -4401,8 +4452,8 @@ authentication:
             # @schema
             override: ~
             repository: "ghcr.io/spiffe/spire-agent"
-            tag: "1.14.4"
-            digest: "sha256:f93996a9396ec4042a48042085c2abf1a0f8f0f3b339571e06ebfebbf94bb830"
+            tag: "1.15.2"
+            digest: "sha256:1d042e4040466686e0ee46f74981ff2167c86adfadca19b3835946f4d6047536"
             useDigest: true
             pullPolicy: "Always"
           # -- SPIRE agent service account
@@ -4456,8 +4507,8 @@ authentication:
             # @schema
             override: ~
             repository: "ghcr.io/spiffe/spire-server"
-            tag: "1.14.4"
-            digest: "sha256:27c7d356768b8641c569745e1121328affeb4aaabe0c974d33ff92dddecf30ef"
+            tag: "1.15.2"
+            digest: "sha256:aa74ef1be86bc8e0684007d84a4d9859d294384d842c30425048d73429f3216e"
             useDigest: true
             pullPolicy: "Always"
           # -- SPIRE server service account
@@ -4583,3 +4634,6 @@ standaloneDnsProxy:
     digest: ""
     useDigest: false
     pullPolicy: "Always"
+# -- Enable the Network Driver feature
+networkDriver:
+  enabled: false
