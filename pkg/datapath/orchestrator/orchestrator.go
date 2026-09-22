@@ -136,16 +136,21 @@ func newOrchestrator(params orchestratorParams) *orchestrator {
 
 	params.Lifecycle.Append(cell.Hook{
 		OnStart: func(ctx cell.HookContext) error {
+			var watch <-chan struct{}
 			for {
-				rxt := params.DB.ReadTxn()
-				mtuRoute, _, watch, found := params.MTU.GetWatch(rxt, mtu.MTURouteIndex.Query(mtu.DefaultPrefixV4))
-				if !found {
+				if watch != nil {
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
 					case <-watch:
-						continue
 					}
+				}
+
+				rxt := params.DB.ReadTxn()
+				mtuRoute, _, watchOut, found := params.MTU.GetWatch(rxt, mtu.MTURouteIndex.Query(mtu.DefaultPrefixV4))
+				watch = watchOut
+				if !found {
+					continue
 				}
 
 				// Reinitialize the host device in a separate, blocking start hook to make sure all
